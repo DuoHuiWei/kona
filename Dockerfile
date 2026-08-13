@@ -34,9 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends texinfo
 
 RUN make clean
 RUN make -j tldr
-RUN make -j
 
 
-RUN pip3 install -r requirements.txt
 
 CMD ["/bin/bash"]

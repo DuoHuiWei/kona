@@ -1,0 +1,48 @@
+# 以当前稳定的 Kona 镜像为基础，派生一个只用于 OpenFHE 环境验证的镜像。
+FROM kona-local
+
+ARG OPENFHE_VERSION=v1.5.1
+ARG OPENFHE_PREFIX=/opt/openfhe
+ARG BUILD_JOBS=8
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        git \
+        ca-certificates \
+        autoconf \
+        automake \
+        libtool \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone \
+        --branch ${OPENFHE_VERSION} \
+        --depth 1 \
+        https://github.com/openfheorg/openfhe-development.git \
+        /tmp/openfhe \
+    && cmake \
+        -S /tmp/openfhe \
+        -B /tmp/openfhe/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=${OPENFHE_PREFIX} \
+        -DBUILD_UNITTESTS=OFF \
+        -DBUILD_EXAMPLES=OFF \
+        -DBUILD_BENCHMARKS=OFF \
+        -DBUILD_EXTRAS=OFF \
+        -DBUILD_SHARED=ON \
+        -DBUILD_STATIC=OFF \
+        -DWITH_OPENMP=ON \
+        -DWITH_NTL=OFF \
+        -DWITH_TCM=OFF \
+        -DWITH_NATIVEOPT=OFF \
+    && cmake --build /tmp/openfhe/build \
+        --parallel ${BUILD_JOBS} \
+    && cmake --install /tmp/openfhe/build \
+    && echo "${OPENFHE_PREFIX}/lib" > /etc/ld.so.conf.d/openfhe.conf \
+    && ldconfig \
+    && rm -rf /tmp/openfhe
+
+ENV CMAKE_PREFIX_PATH=${OPENFHE_PREFIX}
+

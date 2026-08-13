@@ -138,6 +138,13 @@ CFLAGS += -fPIC -g
 
 LDLIBS += -Wl,-rpath -Wl,$(CURDIR)
 
+OPENFHE_PREFIX ?= /opt/openfhe
+OPENFHE_INCLUDE_ROOT = $(OPENFHE_PREFIX)/include
+OPENFHE_INCLUDE = $(OPENFHE_INCLUDE_ROOT)/openfhe
+OPENFHE_LIBDIR = $(OPENFHE_PREFIX)/lib
+OPENFHE_CFLAGS = -fopenmp -I$(OPENFHE_INCLUDE_ROOT) -I$(OPENFHE_INCLUDE) -I$(OPENFHE_INCLUDE)/core -I$(OPENFHE_INCLUDE)/pke -I$(OPENFHE_INCLUDE)/binfhe
+OPENFHE_LDLIBS = -L$(OPENFHE_LIBDIR) -Wl,-rpath -Wl,$(OPENFHE_LIBDIR) -lOPENFHEcore -lOPENFHEpke -lOPENFHEbinfhe -fopenmp
+
 $(SHAREDLIB): $(PROCESSOR) $(COMMONOBJS) GC/square64.o GC/Instruction.o
 	$(CXX) $(CFLAGS) -shared -o $@ $^ $(LDLIBS)
 
@@ -208,6 +215,9 @@ Fake-Offline.x: Utils/Fake-Offline.o $(VM)
 tree-inference.x: Machines/tree-inference.cpp  $(MINI_OT) $(SHAREDLIB)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) -I/usr/local/include/SEAL-4.1/ -L/usr/local/lib  -lseal-4.1 $(SHAREDLIB)
 
+kona-he.x: CFLAGS += $(OPENFHE_CFLAGS)
+kona-he.x: Machines/kona-he.o
+	$(CXX) -o $@ $(CFLAGS) $^ $(OPENFHE_LDLIBS)
 
 %.x: Machines/%.o $(MINI_OT) $(SHAREDLIB)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)

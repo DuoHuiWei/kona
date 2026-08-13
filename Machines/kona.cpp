@@ -12,6 +12,8 @@
 #include "../Math/Z2k.hpp"
 #include "Tools/TimerWithComm.h"
 #include "Math/FixedVec.h"
+#include "Machines/kona-cong-kona-adapter.hpp"
+#include "Machines/kona-dcf-compare.hpp"
 
 
 using namespace std;
@@ -31,6 +33,52 @@ void parse_argv(int argc, const char** argv);
 void gen_fake_dcf(int beta, int n);
 bigint evaluate(Z2<K> x, int n,int playerID);
 long long call_evaluate_time=0;
+
+enum class TopKBackend
+{
+    LegacyTop1,
+    CongPCR,
+    CongDCF,
+};
+
+TopKBackend topk_backend = TopKBackend::LegacyTop1;
+
+const char* topk_backend_name()
+{
+    switch (topk_backend)
+    {
+    case TopKBackend::LegacyTop1:
+        return "legacy-top1";
+    case TopKBackend::CongPCR:
+        return "cong-pcr";
+    case TopKBackend::CongDCF:
+        return "cong-dcf";
+    }
+    return "unknown";
+}
+
+void apply_topk_backend(
+        std::vector<std::array<Z2<K>,2>>& shares,
+        int k,
+        bool min_k,
+        RealTwoPartyPlayer* player_ptr,
+        KonaDcfCompare::Compare64<K>* cong_dcf_compare)
+{
+    if (topk_backend == TopKBackend::CongPCR)
+    {
+        KonaCongKonaAdapter::cong_top_k_with_pcr<K>(
+                shares, k, min_k, player_ptr);
+    }
+    else if (topk_backend == TopKBackend::CongDCF)
+    {
+        KonaCongKonaAdapter::cong_top_k_with_dcf<K>(
+                shares, k, min_k, *cong_dcf_compare, player_ptr);
+    }
+    else
+    {
+        throw runtime_error("legacy top_1 must use member function path");
+    }
+}
 
 
 // 全局变量用于累计总运行时间
@@ -193,7 +241,7 @@ int main(int argc, const char** argv)
     // vector<string>dataset_name_list={"Iris","Wine","Cancer","Spambase","Adult","Mnist","Dota2Games"};
     // vector<string>dataset_name_list={"Iris"};
     dir="knn-1/";
-    vector<string>dataset_name_list={"arcene"};
+    vector<string>dataset_name_list={"tcga-pancan"};
     for(int i=0;i<dataset_name_list.size();i++){
         dataset_name=dataset_name_list[i];
         cout<<"--------DataSet:"<<dataset_name<<"--------------"<<endl;
@@ -687,6 +735,7 @@ void KNN_party_optimized::run()
     std::cout<<"sample size:"<<num_train_data<<std::endl;
     std::cout<<"test size:"<<num_test_data<<std::endl;
     std::cout<<"Feature size:"<<num_features<<std::endl;
+    std::cout<<"Top-k backend:"<<topk_backend_name()<<std::endl;
 
     // generate_triples_save_file();//这个函数必须独立运行，不能和后续load_triple一起使用。
     // cout<<"\n generate_triples_save_file success!"<<endl;
@@ -702,6 +751,10 @@ void KNN_party_optimized::run()
     timer.start(m_player->total_comm());
 
     player->VirtualTwoPartyPlayer_Round=0;
+
+    KonaDcfCompare::Compare64<K>* cong_dcf_compare = 0;
+    if (topk_backend == TopKBackend::CongDCF)
+        cong_dcf_compare = new KonaDcfCompare::Compare64<K>(m_player, m_playerno);
 
 
     int right_prediction_cnt=0;
@@ -721,9 +774,22 @@ void KNN_party_optimized::run()
         // std::cout<<std::endl;
 
         // 选择top-k 最小的k个值放到最后面的k个位置
-        for(int i=0;i<k_const;i++){
-            top_1(m_ESD_vec,num_train_data-i,true); 
-            // cout<<"2  Total Round count = "<<player->VirtualTwoPartyPlayer_Round<< " online round"<<endl;
+        if (topk_backend == TopKBackend::CongPCR)
+        {
+            apply_topk_backend(
+                    m_ESD_vec, k_const, true, m_player, cong_dcf_compare);
+        }
+        else if (topk_backend == TopKBackend::CongDCF)
+        {
+            apply_topk_backend(
+                    m_ESD_vec, k_const, true, m_player, cong_dcf_compare);
+        }
+        else
+        {
+            for(int i=0;i<k_const;i++){
+                top_1(m_ESD_vec,num_train_data-i,true); 
+                // cout<<"2  Total Round count = "<<player->VirtualTwoPartyPlayer_Round<< " online round"<<endl;
+            }
         }
 
         // for(int i=0;i<num_train_data;i++)
@@ -740,7 +806,15 @@ void KNN_party_optimized::run()
         
         this->label_compute(shares_selected_k,m_shared_label_list_count_array);
         // cout<<"label_compute  Total Round count = "<<player->VirtualTwoPartyPlayer_Round<< " online round"<<endl;
-        top_1(m_shared_label_list_count_array,k_const,false);
+        if (topk_backend == TopKBackend::LegacyTop1)
+            top_1(m_shared_label_list_count_array,k_const,false);
+        else
+            apply_topk_backend(
+                    m_shared_label_list_count_array,
+                    1,
+                    false,
+                    m_player,
+                    cong_dcf_compare);
         // cout<<"top_1 of K neighbors  Total Round count = "<<player->VirtualTwoPartyPlayer_Round<< " online round"<<endl;
         
         Z2<K>predicted_label=reveal_one_num_to(m_shared_label_list_count_array[k_const-1][1],1); 
@@ -764,6 +838,7 @@ void KNN_party_optimized::run()
     std::cout<<"call_evaluate_nums : "<<call_evaluate_time<<std::endl;
 
     std::cout << "在Evaluation函数中 Total elapsed time: " << total_duration.count() << " seconds" << std::endl;
+    delete cong_dcf_compare;
     call_evaluate_time=0;
     total_duration = std::chrono::duration<double>(0);
 
@@ -1596,6 +1671,15 @@ void parse_argv(int argc, const char** argv)
           "--portnumbase" // Flag token.
   );
   opt.add(
+          "legacy-top1", // Default.
+          0, // Required?
+          1, // Number of args expected.
+          0, // Delimiter if expecting multiple args.
+          "Top-k backend: legacy-top1, cong-pcr, or cong-dcf.", // Help description.
+          "-tb", // Flag token.
+          "--topk-backend" // Flag token.
+  );
+  opt.add(
           "", // Default.
           0, // Required?
           1, // Number of args expected.
@@ -1638,6 +1722,17 @@ void parse_argv(int argc, const char** argv)
     opt.get("-p")->getInt(playerno);
   else
     sscanf(argv[1], "%d", &playerno);
+
+  string backend;
+  opt.get("--topk-backend")->getString(backend);
+  if (backend == "legacy-top1")
+    topk_backend = TopKBackend::LegacyTop1;
+  else if (backend == "cong-pcr")
+    topk_backend = TopKBackend::CongPCR;
+  else if (backend == "cong-dcf")
+    topk_backend = TopKBackend::CongDCF;
+  else
+    throw runtime_error("unknown --topk-backend value: " + backend);
 }
 
 

@@ -28,7 +28,7 @@ int num_features;// 特征数
 int num_train_data; // 训练集数据总量
 int num_test_data; // 测试集数据总量
 int num_label; // 训练集中label数量
-string dataset_name="chronic";
+string dataset_name="knn-1/arcene";
 // string dataset_name="mnist";//数据集名称，自动用于后续的文件名生成
 
 void read_meta_data()
