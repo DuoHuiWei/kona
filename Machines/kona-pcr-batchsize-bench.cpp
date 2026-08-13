@@ -113,7 +113,7 @@ double total_comm_seconds(NamedCommStats stats)
 struct RepeatResult
 {
     vector<double> chunk_ms;
-    double total_ms = 0;
+    double online_ms = 0;
     double compute_ms = 0;
     double comm_ms = 0;
     size_t sent_bytes = 0;
@@ -174,9 +174,9 @@ RepeatResult run_one_repeat(
     auto comm_after = player->total_comm();
     auto comm_delta = comm_after - comm_before;
 
-    out.total_ms = chrono::duration<double>(total_end - total_start).count() * 1000.0;
+    out.online_ms = chrono::duration<double>(total_end - total_start).count() * 1000.0;
     out.comm_ms = total_comm_seconds(comm_delta) * 1000.0;
-    out.compute_ms = out.total_ms - out.comm_ms;
+    out.compute_ms = out.online_ms - out.comm_ms;
     out.sent_bytes = comm_delta.sent;
     out.transport_rounds = total_rounds(comm_delta);
     out.logical_rounds = out.transport_rounds / 2;
@@ -197,7 +197,7 @@ void print_repeat(int batch_size, int repeat_idx, const RepeatResult& r)
             cout << ",";
         cout << r.chunk_ms[i];
     }
-    cout << "] total_ms=" << r.total_ms
+    cout << "] online_ms=" << r.online_ms
          << " compute_ms=" << r.compute_ms
          << " comm_ms=" << r.comm_ms
          << " sent_bytes=" << r.sent_bytes
@@ -218,7 +218,7 @@ void print_average(int batch_size, const vector<RepeatResult>& results)
     double avg_logical = 0;
     for (const auto& r : results)
     {
-        avg_total += r.total_ms;
+        avg_total += r.online_ms;
         avg_compute += r.compute_ms;
         avg_comm += r.comm_ms;
         avg_sent += r.sent_bytes;
@@ -251,7 +251,7 @@ void print_average(int batch_size, const vector<RepeatResult>& results)
             cout << ",";
         cout << avg_chunk[i];
     }
-    cout << "] avg_total_ms=" << avg_total
+    cout << "] avg_online_ms=" << avg_total
          << " avg_compute_ms=" << avg_compute
          << " avg_comm_ms=" << avg_comm
          << " avg_sent_bytes=" << avg_sent
@@ -274,11 +274,11 @@ int main(int argc, const char** argv)
         vector<Z2<K>> y_shares;
         build_inputs(x_shares, y_shares);
 
-        std::vector<int> batch_sizes = {1024, 4096, 8193, 16348, 32696};
+        std::vector<int> batch_sizes = only_batch_size > 0 ?
+                std::vector<int>{only_batch_size} :
+                std::vector<int>{1024, 4096, 8193, 16348, 32696};
         for (int batch_size : batch_sizes)
         {
-            if (only_batch_size > 0 && batch_size != only_batch_size)
-                continue;
             if (batch_size > total_compare)
                 continue;
             vector<RepeatResult> results;

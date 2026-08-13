@@ -39,6 +39,7 @@ struct BenchResult
     size_t logical_rounds = 0;
     uint64_t checksum = 0;
     uint64_t winner_label_share = 0;
+    double dcf_key_init_seconds = 0;
 };
 
 uint64_t mix64(uint64_t x)
@@ -375,6 +376,7 @@ void print_result(
          << " sent_bytes=" << r.sent_bytes
          << " transport_rounds=" << r.transport_rounds
          << " logical_rounds=" << r.logical_rounds
+         << " dcf_key_init_ms=" << r.dcf_key_init_seconds * 1000.0
          << " checksum=" << r.checksum
          << " winner_label_share=" << r.winner_label_share
          << endl;
@@ -394,7 +396,6 @@ int main(int argc, const char** argv)
         auto shares = build_shares(n);
         if (playerno == 0)
             cout << "mode=" << mode << endl;
-        KonaDcfCompare::Compare64<K> dcf_compare(player, playerno);
 
         if (mode == "legacy")
         {
@@ -410,8 +411,14 @@ int main(int argc, const char** argv)
         }
         else if (mode == "cong-dcf")
         {
+            auto dcf_key_init_start = chrono::steady_clock::now();
+            KonaDcfCompare::Compare64<K> dcf_compare(player, playerno);
+            auto dcf_key_init_end = chrono::steady_clock::now();
             auto cong_dcf = benchmark_cong_network_dcf(
                     shares, k, player, dcf_compare);
+            cong_dcf.dcf_key_init_seconds =
+                    chrono::duration<double>(
+                            dcf_key_init_end - dcf_key_init_start).count();
             if (playerno == 0)
                 print_result("CONG_DCF_TOPK", n, k, cong_dcf);
         }

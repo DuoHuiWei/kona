@@ -199,8 +199,8 @@ int main(int argc, const char** argv)
     cout << "triples_per_pair=" << triples_per_pair << endl;
     cout << "num_pairs=" << num_pairs << endl;
     cout << "total_triples=" << total_triples << endl;
-    cout << "single_pair_gen_seconds=" << pair_time.count() << endl;
-    cout << "all_pairs_gen_and_write_seconds=" << total_time.count() << endl;
+    cout << "single_pair_offline_gen_seconds=" << pair_time.count() << endl;
+    cout << "all_pairs_offline_gen_and_write_seconds=" << total_time.count() << endl;
     cout << "triples_per_second=" << (double)total_triples / total_time.count() << endl;
     cout << "sent_bytes=" << comm_delta.sent << endl;
     cout << "rounds=" << total_rounds(comm_delta) << endl;

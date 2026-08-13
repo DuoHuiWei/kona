@@ -350,9 +350,9 @@ int main(int argc, const char** argv)
     chrono::duration<double> one_query_time = one_query_end - one_query_start;
     chrono::duration<double> record_time = record_end - record_start;
     chrono::duration<double> pair_loop_time = pair_loop_end - pair_loop_start;
-    chrono::duration<double> total_time = total_end - total_start;
-    chrono::duration<double> pure_total_time =
-            total_time - record_time;
+    chrono::duration<double> benchmark_wall_time = total_end - total_start;
+    chrono::duration<double> benchmark_wall_excluding_record_time =
+            benchmark_wall_time - record_time;
 
     cout << "dataset=" << dataset_name << endl;
     cout << "player=" << playerno << endl;
@@ -362,16 +362,16 @@ int main(int argc, const char** argv)
     cout << "distance_scalar_count=" << party.num_train_data << endl;
     cout << "benchmark_case=1_query_to_all_train_samples" << endl;
     cout << "read_seconds=" << read_time.count() << endl;
-    cout << "fake_triple_load_seconds=" << triple_time.count() << endl;
+    cout << "triple_load_setup_seconds=" << triple_time.count() << endl;
     cout << "share_setup_seconds=" << share_time.count() << endl;
-    cout << "compute_one_query_seconds=" << one_query_time.count() << endl;
-    cout << "record_distance_label_seconds=" << record_time.count() << endl;
+    cout << "online_distance_seconds=" << one_query_time.count() << endl;
+    cout << "correctness_output_record_seconds=" << record_time.count() << endl;
     cout << "distance_record_path=" << distance_record_path << endl;
-    cout << "compute_all_pairs_loop_seconds=" << pair_loop_time.count() << endl;
+    cout << "all_pairs_microbenchmark_seconds=" << pair_loop_time.count() << endl;
     cout << "pair_ns=" << pair_loop_time.count() * 1e9 / party.num_train_data << endl;
     cout << "checksum_limb0=" << checksum.get_limb(0) << endl;
-    cout << "pure_total_seconds=" << pure_total_time.count() << endl;
-    cout << "total_seconds=" << pure_total_time.count() << endl;
-    cout << "wall_total_seconds_including_record=" << total_time.count() << endl;
+    cout << "benchmark_wall_seconds_excluding_record="
+         << benchmark_wall_excluding_record_time.count() << endl;
+    cout << "benchmark_wall_seconds=" << benchmark_wall_time.count() << endl;
     return 0;
 }

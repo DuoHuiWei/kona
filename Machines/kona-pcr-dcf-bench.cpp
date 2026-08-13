@@ -179,19 +179,22 @@ void print_bench_line(
         size_t transport_rounds,
         size_t logical_rounds,
         long long eval_calls,
-        chrono::duration<double> eval_time)
+        chrono::duration<double> eval_time,
+        chrono::duration<double> dcf_key_init_time =
+                chrono::duration<double>::zero())
 {
     cout << name
          << " n=" << n
          << " repeats=" << repeats
-         << " total_ms=" << elapsed.count() * 1000.0
-         << " avg_ms=" << elapsed.count() * 1000.0 / repeats
+         << " online_ms=" << elapsed.count() * 1000.0
+         << " avg_online_ms=" << elapsed.count() * 1000.0 / repeats
          << " ns_per_compare=" << elapsed.count() * 1e9 / n / repeats
          << " sent_bytes=" << sent_bytes
          << " transport_rounds=" << transport_rounds
          << " logical_rounds=" << logical_rounds
          << " dcf_evaluate_calls=" << eval_calls
          << " dcf_eval_total_ms=" << eval_time.count() * 1000.0
+         << " dcf_key_init_ms=" << dcf_key_init_time.count() * 1000.0
          << endl;
 }
 
@@ -302,11 +305,16 @@ int main(int argc, const char** argv)
                     chrono::duration<double>::zero());
         }
 
-        auto dcf_start = chrono::steady_clock::now();
+        auto dcf_key_init_start = chrono::steady_clock::now();
         KonaDcfCompare::Compare64<K> timed_dcf_compare(player, playerno);
+        auto dcf_key_init_end = chrono::steady_clock::now();
+        chrono::duration<double> dcf_key_init_time =
+                dcf_key_init_end - dcf_key_init_start;
+
         auto dcf_stats_before = timed_dcf_compare.get_stats();
         auto dcf_comm_before = player->total_comm();
         size_t dcf_sent_before = dcf_comm_before.sent;
+        auto dcf_start = chrono::steady_clock::now();
         for (int r = 0; r < repeats; r++)
         {
             vector<Z2<K>> res(2 * large_n);
@@ -330,7 +338,8 @@ int main(int argc, const char** argv)
                     dcf_stats_after.evaluate_calls -
                             dcf_stats_before.evaluate_calls,
                     dcf_stats_after.evaluate_time -
-                            dcf_stats_before.evaluate_time);
+                            dcf_stats_before.evaluate_time,
+                    dcf_key_init_time);
         }
     }
     catch (...)

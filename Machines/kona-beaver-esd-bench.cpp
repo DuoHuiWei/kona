@@ -323,7 +323,7 @@ int main(int argc, const char** argv)
     chrono::duration<double> query_batched_time =
             query_batched_end - query_batched_start;
     chrono::duration<double> pair_loop_time = pair_loop_end - pair_loop_start;
-    chrono::duration<double> total_time = total_end - total_start;
+    chrono::duration<double> benchmark_wall_time = total_end - total_start;
 
     cout << "dataset=" << dataset_name << endl;
     cout << "player=" << playerno << endl;
@@ -332,13 +332,16 @@ int main(int argc, const char** argv)
     cout << "num_test_data=" << party.num_test_data << endl;
     cout << "read_seconds=" << read_time.count() << endl;
     cout << "share_setup_seconds=" << share_time.count() << endl;
-    cout << "beaver_pair_batched_one_query_seconds=" << pair_batched_time.count() << endl;
-    cout << "beaver_pair_comm_coalesced_one_query_seconds=" << query_batched_time.count() << endl;
-    cout << "beaver_pair_batched_all_pairs_loop_seconds=" << pair_loop_time.count() << endl;
+    cout << "beaver_pair_batched_online_distance_seconds="
+         << pair_batched_time.count() << endl;
+    cout << "beaver_pair_comm_coalesced_online_distance_seconds="
+         << query_batched_time.count() << endl;
+    cout << "beaver_pair_batched_all_pairs_microbenchmark_seconds="
+         << pair_loop_time.count() << endl;
     cout << "beaver_pair_batched_pair_ns=" <<
             pair_loop_time.count() * 1e9 / party.num_train_data << endl;
     cout << "checksum_pair_batched_limb0=" << checksum_pair_batched.get_limb(0) << endl;
     cout << "checksum_pair_comm_coalesced_limb0=" << checksum_query_batched.get_limb(0) << endl;
-    cout << "total_seconds=" << total_time.count() << endl;
+    cout << "benchmark_wall_seconds=" << benchmark_wall_time.count() << endl;
     return 0;
 }

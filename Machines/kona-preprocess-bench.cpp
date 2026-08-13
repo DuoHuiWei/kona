@@ -228,6 +228,6 @@ int main()
     cout << "meta_read_seconds=" << meta_time.count() << endl;
     cout << "dcf_prep_seconds=" << dcf_time.count() << endl;
     cout << "triple_prep_seconds=" << triple_time.count() << endl;
-    cout << "total_seconds=" << total_time.count() << endl;
+    cout << "offline_prep_total_seconds=" << total_time.count() << endl;
     return 0;
 }
