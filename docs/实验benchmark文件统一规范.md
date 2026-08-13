@@ -298,6 +298,10 @@ B. Component / Ablation benchmark
     taskset -c 0 ./program.x 0 ...
     taskset -c 1 ./program.x 1 ...
 
+单机模拟两服务器时，P0 和 P1 必须绑定到不同物理 core。
+如果机器开启 SMT / 超线程，正式实验应优先选择不同物理 core，
+不得把 P0 和 P1 绑定到同一物理 core 的两个 logical CPU sibling。
+
 禁止：
 
     P0 和 P1 同时绑定到同一个 core
