@@ -277,6 +277,54 @@ B. Component / Ablation benchmark
 不得为了匹配理论轮数而隐藏 chunking 产生的通信。
 
 
+
+==================================================
+七补充、理论协议深度与实测通信轮次
+==================================================
+
+必须明确区分以下三个概念：
+
+- theoretical_protocol_depth
+- measured_logical_interactions
+- measured_transport_actions
+
+其中：
+
+theoretical_protocol_depth
+    只用于算法复杂度分析，表示理想协议依赖深度。
+
+measured_logical_interactions
+    表示当前实现实际发生的 implementation-level logical interactions。
+
+measured_transport_actions
+    表示当前 Player / socket 通信统计实际记录到的 send / receive transport actions。
+
+对于当前 PCR：
+
+    PCR Boolean comparison 的理论依赖深度为 7；
+    PCR + B2A 的理论依赖深度为 8。
+
+但实际实验不得强制报告为 8。
+
+如果由于以下原因：
+
+- chunk_size = 16348
+- 单核资源限制
+- 消息大小限制
+- 实现中为了 batching / packing / memory control 做了串行分块
+- compare 后还包含 B2A、secure swap 或其他在线必要步骤
+
+导致同一个协议阶段在实际实现中被拆成多个 chunk 或多个在线通信阶段，
+则这些额外在线通信必须完整计入：
+
+    measured_logical_interactions
+    measured_transport_actions
+
+论文性能表必须使用 measured 值。
+
+theoretical_protocol_depth 只能用于算法复杂度、协议结构或理想化深度分析，
+不得替代实际 benchmark 输出中的 measured rounds / measured interactions。
+
 ==================================================
 八、单进程单核 CPU 规范
 ==================================================

@@ -44,6 +44,8 @@ struct TopkBenchResult
     double compare_seconds = 0;
     double swap_seconds = 0;
     double reorder_seconds = 0;
+    double network_build_seconds = 0;
+    double switch_plan_seconds = 0;
     size_t sent_bytes = 0;
     size_t transport_rounds = 0;
     size_t logical_rounds = 0;
@@ -227,6 +229,8 @@ void print_result(const TopkBenchResult& r)
          << " compare_ms=" << r.compare_seconds * 1000.0
          << " swap_ms=" << r.swap_seconds * 1000.0
          << " reorder_ms=" << r.reorder_seconds * 1000.0
+         << " network_build_ms=" << r.network_build_seconds * 1000.0
+         << " switch_plan_ms=" << r.switch_plan_seconds * 1000.0
          << " sent_bytes=" << r.sent_bytes
          << " transport_rounds=" << r.transport_rounds
          << " logical_rounds=" << r.logical_rounds
@@ -256,11 +260,15 @@ TopkBenchResult benchmark_cong_pcr_topk_only(
     res.n = shares.size();
     res.k = k;
 
-    auto comm_before = player->total_comm();
-    auto total_start = chrono::steady_clock::now();
-
+    auto build_start = chrono::steady_clock::now();
     KonaCongTopK::CongNetwork network =
             KonaCongTopK::build_cong_network((int)shares.size(), k);
+    auto build_end = chrono::steady_clock::now();
+    res.network_build_seconds =
+            chrono::duration<double>(build_end - build_start).count();
+
+    auto comm_before = player->total_comm();
+    auto total_start = chrono::steady_clock::now();
 
     for (size_t depth = 0; depth < network.levels.size(); depth++)
     {
@@ -322,11 +330,15 @@ TopkBenchResult benchmark_cong_dcf_topk_only(
     res.dcf_key_init_seconds =
             chrono::duration<double>(dcf_init_end - dcf_init_start).count();
 
-    auto comm_before = player->total_comm();
-    auto total_start = chrono::steady_clock::now();
-
+    auto build_start = chrono::steady_clock::now();
     KonaCongTopK::CongNetwork network =
             KonaCongTopK::build_cong_network((int)shares.size(), k);
+    auto build_end = chrono::steady_clock::now();
+    res.network_build_seconds =
+            chrono::duration<double>(build_end - build_start).count();
+
+    auto comm_before = player->total_comm();
+    auto total_start = chrono::steady_clock::now();
 
     for (size_t depth = 0; depth < network.levels.size(); depth++)
     {
@@ -390,13 +402,22 @@ TopkBenchResult benchmark_cong_hybrid_topk_only(
     res.dcf_key_init_seconds =
             chrono::duration<double>(dcf_init_end - dcf_init_start).count();
 
-    auto comm_before = player->total_comm();
-    auto total_start = chrono::steady_clock::now();
-
+    auto build_start = chrono::steady_clock::now();
     KonaCongTopK::CongNetwork network =
             KonaCongTopK::build_cong_network((int)shares.size(), k);
+    auto build_end = chrono::steady_clock::now();
+    res.network_build_seconds =
+            chrono::duration<double>(build_end - build_start).count();
+
+    auto plan_start = chrono::steady_clock::now();
     vector<int> effective_sizes =
             estimate_effective_candidate_sizes(network, (int)shares.size());
+    auto plan_end = chrono::steady_clock::now();
+    res.switch_plan_seconds =
+            chrono::duration<double>(plan_end - plan_start).count();
+
+    auto comm_before = player->total_comm();
+    auto total_start = chrono::steady_clock::now();
 
     for (size_t depth = 0; depth < network.levels.size(); depth++)
     {
