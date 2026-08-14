@@ -207,6 +207,14 @@ secure.x: Utils/secure.o
 Fake-Offline.x: Utils/Fake-Offline.o $(VM)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS)
 
+constantpp-tests: constantpp-test-sec-ed.x constantpp-test-sec-shuffle.x
+
+constantpp-test-sec-ed.x: ConstantPP/tests/test-sec-ed.o ConstantPP/sec-ed.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+constantpp-test-sec-shuffle.x: ConstantPP/tests/test-sec-shuffle.o ConstantPP/sec-shuffle.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
 %.x: Utils/%.o $(COMMON)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS)
 
