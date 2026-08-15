@@ -139,3 +139,140 @@ Two real-network, two-process correctness tests are provided under
 The tests deliberately use deterministic public fixtures and deterministic
 preprocessing shares. They are correctness tests, not security benchmarks.
 The online protocol functions still receive only one party's local shares.
+
+
+## Second slice: SecMul and SecBCom material/API skeleton
+
+### SecMul
+
+`sec-mul.hpp/.cpp` implements real two-party Beaver multiplication over
+`Z2<64>`. The online stage opens `e=x-a` and `f=y-b` in one batched
+communication stage and computes additive output shares locally.
+
+The upstream ConstantPP source reuses one triple across vector elements.
+This reimplementation exposes that behavior explicitly as
+`sec_mul_vector_reuse()`, while also providing `sec_mul_vector_fresh()` for
+one-triple-per-element execution.
+
+### SecBCom
+
+`sec-bcom-material.hpp/.cpp` and `sec-bcom.hpp/.cpp` establish the
+Algorithm-7 boundary without pretending that Kona's current `Compare64`
+already provides pair-specific ConstantPP material.
+
+The first faithful plan allocates one material slot for every ordered pair
+`(i,j), i!=j`, with threshold:
+
+`r_ij = r_i - r_j`.
+
+The online shell already implements the paper's one communication stage:
+
+1. `[Delta_i]_p = [x_i]_p + [r_i]_p`;
+2. batch-open all `Delta_i`;
+3. evaluate pair-specific DCF locally on `Delta_i-Delta_j`;
+4. sum local output shares into `[su_i]_p`.
+
+`SecBComDcfBackend` is deliberately opaque. 
+The upper-triangular reverse-share shortcut used by the upstream GitHub
+source is intentionally not enabled yet. It can be added only after its
+complement relation is proved against the chosen DCF backend.
+
+
+## SecBCom engineering decision: upper triangle + Kona DCF
+
+The finalized first SecBCom implementation follows the ConstantPP algorithmic
+structure but deliberately reuses Kona's existing secure DCF comparison
+primitive.
+
+What remains ConstantPP:
+
+- all-pairs rank/count semantics;
+- one comparison stage independent of `n`;
+- only the upper triangle `i<j` is evaluated;
+- each unordered pair updates both rank counters;
+- total secure comparison pairs are `n(n-1)/2`.
+
+What is reused from Kona:
+
+- `KonaDcfCompare::Compare64<64>`;
+- `Z2<64>`;
+- `RealTwoPartyPlayer`;
+- Kona's masked-opening communication;
+- Kona's DCF/FSS evaluation path;
+- Kona's batching and `MAX_COMPARE_CHUNK` transport behavior.
+
+No private `x_i` or `x_j` is reconstructed in SecBCom.
+
+The public ConstantPP source uses an upper-triangle complement trick. We
+retain that engineering behavior. For one secret comparison bit `[b]`,
+the reverse direction is represented as `[1-b]`, with public one shared as
+`(1,0)`. This also gives a deterministic source-like total ordering for
+equal values.
+
+`MAX_COMPARE_CHUNK` affects transport chunking only. The ConstantPP logical
+round count for SecBCom remains one comparison stage.
+
+The Kona comparator internally performs the DCF work required by its signed
+64-bit comparison construction; `SecBComStats` exposes the resulting Kona
+DCF evaluate-call count rather than pretending it equals the number of
+unordered pairs.
+
+
+## SecKMin
+
+`sec-kmin.hpp/.cpp` implements the ConstantPP k-minimum label stage using:
+
+1. real two-party SecShuffle on aligned `(distance,label)` shares;
+2. upper-triangle ConstantPP SecBCom with Kona DCF;
+3. secure Kona-DCF threshold comparison for
+   `u_i = 1{su_i > n-k-1}`;
+4. real opening of only the final indicator bits `u_i`;
+5. local selection of the corresponding shuffled label shares.
+
+Expected ConstantPP logical rounds:
+
+- SecShuffle: 2
+- SecBCom: 1
+- threshold comparison: 1
+- indicator opening: 1
+- total SecKMin: 5
+
+Engineering note: the paper describes masking `su_i` with a random `r`
+and evaluating a threshold-shifted DCF. In the unified Kona implementation
+the same secure predicate is realized directly with Kona Compare64 on
+secret-shared `su_i` against a secret sharing of the public threshold.
+`su_i` itself is never reconstructed before the indicator stage. This keeps
+the comparison secure and preserves the one-stage round structure while
+using the exact same DCF implementation as the Kona baseline.
+
+
+## Baseline policy: repository logic + Kona secure engineering
+
+This reimplementation uses the following rule consistently:
+
+- **Algorithm/control-flow semantics follow the public `constantPP-KNN`
+  repository**, including upper-triangular all-pairs rank counting and
+  reuse of one comparator/FSS key object across a batch of comparisons.
+- **Security, networking, batching, and benchmark engineering follow Kona**:
+  `Z2<64>`, `RealTwoPartyPlayer`, `octetStream`, Kona DCF, real two-process
+  communication, and Kona's communication/timing counters.
+- The repository's single-process shortcuts that reconstruct both parties'
+  shares or perform plaintext `<`, `>`, or `==` are never copied.
+- The paper's pair-specific DCF-key description is therefore not implemented
+  literally in this unified-framework baseline; the public repository's
+  key-reuse engineering behavior is the baseline target.
+
+For SecBCom this means:
+
+- evaluate only `i < j`, so there are `n(n-1)/2` secure pair comparisons;
+- one secret comparison share updates both rank counters;
+- one Kona `Compare64<64>` instance/key-cache is reused over the comparison
+  batch;
+- no private `x_i` or `x_j` is reconstructed.
+
+For SecKMin this means:
+
+- reuse the same Kona GT-comparator object across all `n` threshold tests;
+- securely evaluate `u_i = 1{su_i > n-k-1}`;
+- open only the final indicator bits `u_i`;
+- normal benchmark cases `1 <= k < n` execute the full five-round path.

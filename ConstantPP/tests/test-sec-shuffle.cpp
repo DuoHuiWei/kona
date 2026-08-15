@@ -116,7 +116,7 @@ vector<ConstantPP::Ring> make_test_share(
  *     output[i] = input[pi[i]]
  *
  * pi0 = [2,0,3,1]
- * pi1 = [1,3,0,2]
+ * pi1 = [3,2,0,1]
  *
  * Therefore the reconstructed output must equal pi0(pi1(input)).
  *
@@ -128,7 +128,7 @@ ConstantPP::ShufflePartyMaterial make_test_shuffle_material(int party)
     ConstantPP::ShufflePartyMaterial material;
 
     const vector<std::size_t> pi0 = {2, 0, 3, 1};
-    const vector<std::size_t> pi1 = {1, 3, 0, 2};
+    const vector<std::size_t> pi1 = {3, 2, 0, 1};
 
     material.permutation = (party == 0) ? pi0 : pi1;
     material.a_share.assign(
@@ -149,13 +149,13 @@ ConstantPP::ShufflePartyMaterial make_test_shuffle_material(int party)
      *
      * b = pi0(pi1(a0) + a1)
      *
-     * col0: [17,25,38,46]
-     * col1: [12,11,15,14]
+     * col0: [17,45,28,36]
+     * col1: [12,13,14,13]
      *
      * We choose fixed b0 shares and derive b1 = b-b0.
      */
-    const std::uint64_t b_plain_col0[4] = {17, 25, 38, 46};
-    const std::uint64_t b_plain_col1[4] = {12, 11, 15, 14};
+    const std::uint64_t b_plain_col0[4] = {17, 45, 28, 36};
+    const std::uint64_t b_plain_col1[4] = {12, 13, 14, 13};
 
     const std::uint64_t b0_col0[4] = {101, 102, 103, 104};
     const std::uint64_t b0_col1[4] = {201, 202, 203, 204};
@@ -294,7 +294,7 @@ int main(int argc, const char** argv)
     if (playerno == 0)
     {
         const vector<std::size_t> pi0 = {2, 0, 3, 1};
-        const vector<std::size_t> pi1 = {1, 3, 0, 2};
+        const vector<std::size_t> pi1 = {3, 2, 0, 1};
 
         const auto expected_values =
                 apply_test_permutation(

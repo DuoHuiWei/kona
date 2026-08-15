@@ -78,6 +78,28 @@ struct ProtocolStats
     }
 };
 
+
+enum class CompareOp
+{
+    Less,
+    Greater
+};
+
+struct BeaverTripleParty
+{
+    Ring a_share;
+    Ring b_share;
+    Ring c_share;
+};
+
+struct BeaverTripleDealer
+{
+    std::array<BeaverTripleParty, 2> party;
+};
+
+
+
+
 } // namespace ConstantPP
 
 #endif // CONSTANTPP_CONSTANTPP_TYPES_HPP_

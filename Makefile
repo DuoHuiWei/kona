@@ -207,12 +207,27 @@ secure.x: Utils/secure.o
 Fake-Offline.x: Utils/Fake-Offline.o $(VM)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS)
 
-constantpp-tests: constantpp-test-sec-ed.x constantpp-test-sec-shuffle.x
+constantpp-tests: constantpp-test-sec-ed.x constantpp-test-sec-shuffle.x constantpp-test-sec-bcom.x constantpp-test-sec-kmin.x constantpp-test-sec-eq.x constantpp-test-sec-fre.x constantpp-test-sec-max.x
 
 constantpp-test-sec-ed.x: ConstantPP/tests/test-sec-ed.o ConstantPP/sec-ed.o $(COMMON)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
 
 constantpp-test-sec-shuffle.x: ConstantPP/tests/test-sec-shuffle.o ConstantPP/sec-shuffle.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+constantpp-test-sec-bcom.x: ConstantPP/tests/test-sec-bcom.o ConstantPP/sec-bcom.o ConstantPP/sec-bcom-material.o ConstantPP/sec-mul.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+constantpp-test-sec-kmin.x: ConstantPP/tests/test-sec-kmin.o ConstantPP/sec-kmin.o ConstantPP/sec-shuffle.o ConstantPP/sec-bcom.o ConstantPP/sec-bcom-material.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+constantpp-test-sec-eq.x: ConstantPP/tests/test-sec-eq.o ConstantPP/sec-eq.o ConstantPP/sec-bcom-material.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+constantpp-test-sec-fre.x: ConstantPP/tests/test-sec-fre.o ConstantPP/sec-fre.o ConstantPP/sec-eq.o ConstantPP/sec-bcom-material.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+constantpp-test-sec-max.x: ConstantPP/tests/test-sec-max.o ConstantPP/sec-max.o ConstantPP/sec-bcom.o ConstantPP/sec-bcom-material.o ConstantPP/sec-eq.o ConstantPP/sec-mul.o $(COMMON)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
 
 %.x: Utils/%.o $(COMMON)
