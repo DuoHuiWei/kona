@@ -1,5 +1,14 @@
 # Bench记录与统一计时、通信统计口径
 
+2026-11-06参数与轮次修正（后续实验优先采用）：
+
+- 共享默认值只在 `Machines/kona-bench-config.hpp` 定义：LAN阈值180、WAN阈值6000、DCF比较chunk16384对、乘法chunk16384项。协议默认值、C++入口和Python启动脚本均引用它；运行参数可显式覆盖阈值。网络profile仍由 `Scripts/container-network.sh` 管理，CPU映射仍由现有affinity模块管理。
+- 只有两个轮次口径：`theoretical_rounds` 是不展开chunk的协议依赖阶段数；`exchange_rounds` 是实际执行的通信交换数（真实轮次）。发送/接收原始动作计数改名 `transport_actions`，仅作校验，不是第三种轮次。保留P0、P1各自记录，不拿结构深度或单方发送次数替代通信轮次。
+- 共享Cong前缀按每个分支的真实依赖路径累计理论轮次；投票模块自己记录逻辑比较/乘法批次及展开chunk后的交换数。完整在线仍连续单独计时，统计和验证在计时结束后完成。
+- `hybrid full` 的 `--comparator hybrid|dcf|pcr` 在公共参数解析中落实；`--matrix-backend` 只覆盖矩阵排名，优化投票始终DCF。统一脚本支持这些显式覆盖，并检查C++回报值；不支持的scope明确拒绝，不能静默忽略。
+- ConstantPP `pre-vote` 阈值通信校验按DCF的实际chunk数计算；Kona full/checkpoint的交换校验按各层实际chunk推导，理论轮次另按原网络依赖层推导。
+- 历史日志字段不改写，不追查旧批次；旧文中把 `logical_rounds` 当实际交换的段落只作历史记录。本次仅修参数/计量，不更换算法、阈值、swap或投票规则。
+
 确认日期：2026-11-03（Asia/Shanghai）。
 
 补充确认：2026-11-04。**“端到端”专指完整KNN的在线流程，从输入份额和离线材料就绪、开始在线距离计算，到安全投票输出最终判定类别的秘密份额就绪。完整在线总量和各在线阶段的数据必须同时记录。**

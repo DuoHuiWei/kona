@@ -1,6 +1,7 @@
 #ifndef MACHINES_KONA_DCF_COMPARE_HPP_
 #define MACHINES_KONA_DCF_COMPARE_HPP_
 
+#include "kona-bench-config.hpp"
 #include <cassert>
 #include <array>
 #include <chrono>
@@ -24,7 +25,7 @@ class Compare64
     static_assert(K == 64, "KonaDcfCompare::Compare64 currently targets Z2<64>");
 
     static const int LAMBDA_BYTES = 16;
-    static const size_t MAX_COMPARE_CHUNK = 16384;
+    static const size_t MAX_COMPARE_CHUNK = KonaBenchConfig::DCF_CHUNK;
 
 public:
     struct Stats

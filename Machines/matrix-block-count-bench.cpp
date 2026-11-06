@@ -62,7 +62,7 @@ uint64_t checksum(const vector<Plain>& rows){uint64_t h=1469598103934665603ULL;
     return h;}
 void print(const string& phase,const string& method,int b,int trial,int party,const string& profile,const Metric& m){
     cout<<"MATRIX_PHASE phase="<<phase<<" method="<<method<<" B="<<b<<" trial="<<trial<<" party="<<party
-        <<" profile="<<profile<<" online_ms="<<m.ms<<" sent_bytes="<<m.bytes<<" transport_rounds="<<m.actions
+        <<" profile="<<profile<<" online_ms="<<m.ms<<" sent_bytes="<<m.bytes<<" transport_actions="<<m.actions
         <<" exchange_rounds="<<m.actions/2<<" theoretical_rounds="<<m.logical<<" dcf_evaluate_calls="<<m.calls
         <<" comparators="<<m.comparisons<<" dcf_comparators="<<m.dcf<<" pcr_comparators="<<m.pcr<<" timing_kind=measured\n";
 }
@@ -132,7 +132,7 @@ int run(int argc,const char** argv){
             const auto expected_backend=KonaReducedDepthHybrid::Backend::DCF;
             if(backend!=expected_backend)throw runtime_error("unexpected comparison backend");
             metric.comparisons=pairs;metric.pcr=pcr?pairs:0;metric.dcf=pcr?0:pairs;metric.logical=pcr?8:1;
-            expected_bytes+=(pcr?70:8)*pairs;expected_exchanges+=(pcr?7:0)+(pairs+16383)/16384;
+            expected_bytes+=(pcr?70:8)*pairs;expected_exchanges+=(pcr?7:0)+KonaBenchConfig::chunks(pairs,KonaBenchConfig::DCF_CHUNK);
             expected_dcf+=metric.dcf;
             if(string(phase)=="matrix_rank"){rank=metric;rank_backend=KonaReducedDepthHybrid::backend_name(backend);}
             else if(string(phase)=="rank_mask"){mask=metric;mask_backend=KonaReducedDepthHybrid::backend_name(backend);}
@@ -144,7 +144,7 @@ int run(int argc,const char** argv){
             vote=measure(p,dcf,[&]{winner=KonaMaskVote::vote_dcf_optimized<64>(output.candidates,output.mask,classes,p,dcf,false,&vs,k);});
         });
         const auto shape=add(rank,mask);matrix.comparisons=shape.comparisons;matrix.dcf=shape.dcf;matrix.pcr=shape.pcr;matrix.logical=shape.logical;
-        vote.comparisons=vs.comparators();vote.dcf=vote.comparisons;vote.logical=6; // C=4, nonempty secret mask.
+        vote.comparisons=vs.comparators();vote.dcf=vote.comparisons;vote.logical=vs.logical_rounds();
         total.comparisons=matrix.comparisons+vote.comparisons;total.dcf=matrix.dcf+vote.dcf;total.pcr=matrix.pcr;total.logical=matrix.logical+vote.logical;
         auto matrix_other=subtract(subtract(matrix,rank),mask);auto online_other=subtract(subtract(total,matrix),vote);
         bool accounting=matrix.bytes==expected_bytes&&matrix.actions==2*expected_exchanges&&matrix.calls==2*expected_dcf&&

@@ -17,6 +17,7 @@
 #include "Tools/TimerWithComm.h"
 #include "Math/FixedVec.h"
 #include "Machines/kona-bench-affinity.hpp"
+#include "Machines/kona-bench-config.hpp"
 #include "ConstantPP/data-loader.hpp"
 #include <iomanip>
 #include <memory>
@@ -416,7 +417,7 @@ void print_phase(const char* name, double ms, std::uint64_t bytes,
     if (rounds % 2) throw runtime_error("non-paired communication in ConstantPP stage");
     cout << "BENCH_PHASE phase=" << name << " party=" << playerno << " trial=1"
          << " online_ms=" << ms << " sent_bytes=" << bytes
-         << " transport_rounds=" << rounds << " exchange_rounds=" << rounds / 2
+         << " transport_actions=" << rounds << " exchange_rounds=" << rounds / 2
          << " theoretical_rounds=" << theoretical << '\n';
 }
 
@@ -570,9 +571,9 @@ int run(int argc, const char** argv)
                  << elapsed_ms(distance_start, distance_end) << endl;
             cout << "distance_sent_bytes=" << comm_delta.sent << endl;
             cout << "total_sent_bytes=" << comm_delta.sent << endl;
-            cout << "distance_transport_rounds="
+            cout << "distance_transport_actions="
                  << transport_rounds << endl;
-            cout << "total_transport_rounds="
+            cout << "total_transport_actions="
                  << transport_rounds << endl;
             cout << "distance_logical_rounds=1" << endl;
             cout << "total_logical_rounds=1" << endl;
@@ -615,13 +616,13 @@ int run(int argc, const char** argv)
         const auto total_delta = after - before;
         const auto n = dataset.database.size();
         const auto pairs = n * (n - 1) / 2;
-        const auto chunks = (pairs + 16383) / 16384;
+        const auto chunks = KonaBenchConfig::chunks(pairs,KonaBenchConfig::DCF_CHUNK);
         const auto rank_delta = trace.boundaries[1].comm - trace.boundaries[0].comm;
         const auto threshold_delta = trace.boundaries[2].comm - trace.boundaries[1].comm;
         const bool accounting_ok = rank_stats.dcf_compare_pairs == pairs &&
                 rank_stats.kona_dcf_evaluate_calls == 2 * pairs &&
                 rank_delta.sent == 8 * pairs && actions(rank_delta) == 2 * chunks &&
-                threshold_delta.sent == 8 * n && actions(threshold_delta) == 2 &&
+                threshold_delta.sent == 8 * n && actions(threshold_delta) == 2 * KonaBenchConfig::chunks(n,KonaBenchConfig::DCF_CHUNK) &&
                 kmin_stats.threshold_compare_pairs == n &&
                 kmin_stats.threshold_dcf_evaluate_calls == 2 * n &&
                 protocol.logical_rounds == 6;
@@ -665,7 +666,7 @@ int run(int argc, const char** argv)
              << "knn_online_e2e_ms=NOT_IN_SCOPE\nvote_status=NOT_IN_SCOPE\n"
              << "train_count=" << n << "\nfeatures=" << dataset.num_features
              << "\nquery_count=1\nk=" << options.k << "\nrank_compare_pairs=" << pairs
-             << "\nrank_compare_chunk_size=16384\nrank_compare_chunks=" << chunks
+             << "\nrank_compare_chunk_size=" << KonaBenchConfig::DCF_CHUNK << "\nrank_compare_chunks=" << chunks
              << "\nrank_dcf_evaluate_calls=" << rank_stats.kona_dcf_evaluate_calls
              << "\nthreshold_compare_pairs=" << kmin_stats.threshold_compare_pairs
              << "\nthreshold_dcf_evaluate_calls=" << kmin_stats.threshold_dcf_evaluate_calls
@@ -766,7 +767,7 @@ int run(int argc, const char** argv)
         cout << "secmax_mode=" << options.secmax_mode << '\n'
              << "secmax_security=" << (secmax_l2 ? "NOT_PROVIDED_PERFORMANCE_ONLY" : "EXISTING_L2_TEST_SETTINGS") << '\n'
              << "secmax_rank_sent_bytes=" << rank_delta.sent << '\n'
-             << "secmax_rank_transport_rounds=" << actions(rank_delta) << '\n'
+             << "secmax_rank_transport_actions=" << actions(rank_delta) << '\n'
              << "secmax_rank_exchange_rounds=" << actions(rank_delta) / 2 << '\n'
              << "secmax_rank_local_fss_calls=" << kc_stats.max.local_fss_calls << '\n'
              << "secmax_rank_local_fss_ms=" << kc_stats.max.local_fss_ms << '\n'
@@ -790,7 +791,7 @@ int run(int argc, const char** argv)
         cout << "vote_frequency_eq_predicates=" << kc_stats.fre.upper_triangle_eq_predicates << endl;
         cout << "vote_max_compare_pairs=" << kc_stats.max.bcom.dcf_compare_pairs << endl;
         cout << "vote_secure_mul_pairs=" << kc_stats.max.secure_mul_pairs << endl;
-        cout << "chunk_limit=16384\nstructural_depth=NOT_APPLICABLE\n";
+        cout << "chunk_limit=" << KonaBenchConfig::DCF_CHUNK << "\nstructural_depth=NOT_APPLICABLE\n";
         if (playerno == 0) cout << "revealed_label=" << revealed_label << endl;
         cout << "expected_label=" << expected_label << endl;
         cout << "query_label=" << dataset.query_label << endl;
@@ -800,7 +801,7 @@ int run(int argc, const char** argv)
         cout << "stage_sum_ms=" << kc_stats.online.online_ms << endl;
         cout << "comm_ms=" << kc_stats.online.comm_ms << endl;
         cout << "sent_bytes=" << outer_delta.sent << endl;
-        cout << "transport_rounds=" << outer_actions << endl;
+        cout << "transport_actions=" << outer_actions << endl;
         cout << "logical_rounds=" << protocol_stats.logical_rounds << endl;
         cout << "dcf_evaluate_calls="
              << kc_stats.online.dcf_evaluate_calls << endl;
@@ -809,7 +810,7 @@ int run(int argc, const char** argv)
         cout << "distance_ms=" << kc_stats.distance.online_ms << endl;
         cout << "distance_comm_ms=" << kc_stats.distance.comm_ms << endl;
         cout << "distance_sent_bytes=" << kc_stats.distance.sent_bytes << endl;
-        cout << "distance_transport_rounds="
+        cout << "distance_transport_actions="
              << kc_stats.distance.transport_rounds << endl;
         cout << "distance_logical_rounds="
              << kc_stats.distance.logical_rounds << endl;
@@ -818,7 +819,7 @@ int run(int argc, const char** argv)
         cout << "topk_ms=" << kc_stats.topk.online_ms << endl;
         cout << "topk_comm_ms=" << kc_stats.topk.comm_ms << endl;
         cout << "topk_sent_bytes=" << kc_stats.topk.sent_bytes << endl;
-        cout << "topk_transport_rounds="
+        cout << "topk_transport_actions="
              << kc_stats.topk.transport_rounds << endl;
         cout << "topk_logical_rounds="
              << kc_stats.topk.logical_rounds << endl;
@@ -827,7 +828,7 @@ int run(int argc, const char** argv)
         cout << "vote_ms=" << kc_stats.vote.online_ms << endl;
         cout << "vote_comm_ms=" << kc_stats.vote.comm_ms << endl;
         cout << "vote_sent_bytes=" << kc_stats.vote.sent_bytes << endl;
-        cout << "vote_transport_rounds="
+        cout << "vote_transport_actions="
              << kc_stats.vote.transport_rounds << endl;
         cout << "vote_logical_rounds="
              << kc_stats.vote.logical_rounds << endl;
@@ -873,7 +874,7 @@ void phase(const char* name, const Snapshot& a, const Snapshot& b, uint64_t roun
     if (actions(c)%2) throw runtime_error("unpaired communication");
     cout << "BENCH_PHASE phase=" << name << " party=" << playerno << " trial=1"
          << " online_ms=" << std::chrono::duration<double,std::milli>(b.time-a.time).count()
-         << " sent_bytes=" << c.sent << " transport_rounds=" << actions(c)
+         << " sent_bytes=" << c.sent << " transport_actions=" << actions(c)
          << " exchange_rounds=" << actions(c)/2 << " theoretical_rounds=" << rounds
          << " dcf_evaluate_calls=" << b.calls-a.calls
          << " dcf_evaluate_ms=" << b.eval_ms-a.eval_ms;
@@ -1217,7 +1218,7 @@ CachedPlan prepare_cached_top_one(int size){
     return plan;
 }
 uint64_t cached_rounds(const CachedPlan& plan){
-    uint64_t total=0;for(const auto& l:plan){size_t pairs=l.idx.size()/2;total+=(pairs+16383)/16384+(2*pairs+16383)/16384;}return total;
+    uint64_t total=0;for(const auto& l:plan){size_t pairs=l.idx.size()/2;total+=KonaBenchConfig::chunks(pairs,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(2*pairs,KonaBenchConfig::MUL_CHUNK);}return total;
 }
 void cached_top_one(vector<array<Z2<K>,2>>& rows,CachedPlan& plan,bool minimum){
     for(auto& l:plan){cached_dcf->compare_in_vec(rows,l.idx,l.bits,!minimum);KonaCongKonaAdapter::ss_vec_kona_l2<K>(rows,l.idx,l.bits,player);}
@@ -1254,7 +1255,7 @@ void phase(const char* name, const Snapshot& a, const Snapshot& b, uint64_t roun
     if (actions(c)%2) throw runtime_error("unpaired communication");
     cout << "BENCH_PHASE phase=" << name << " party=" << playerno << " trial=1"
          << " online_ms=" << std::chrono::duration<double,std::milli>(b.time-a.time).count()
-         << " sent_bytes=" << c.sent << " transport_rounds=" << actions(c)
+         << " sent_bytes=" << c.sent << " transport_actions=" << actions(c)
          << " exchange_rounds=" << actions(c)/2 << " theoretical_rounds=" << rounds
          << " dcf_evaluate_calls=" << b.calls-a.calls
          << " dcf_evaluate_ms=" << b.eval_ms-a.eval_ms;
@@ -1417,7 +1418,7 @@ int run(int argc,const char** argv) {
         for(int i=0;i<k_const;++i){topk_plans.push_back(prepare_cached_top_one(n-i));selected_rounds+=cached_rounds(topk_plans.back());}
         for(int checkpoint:checkpoints)checkpoint_vote_plans.push_back(prepare_cached_top_one(checkpoint));
         vote_plan=prepare_cached_top_one(k_const);max_rounds=cached_rounds(vote_plan);
-        frequency_rounds=2*((uint64_t(k_const)*k_const+16383)/16384);
+        frequency_rounds=KonaBenchConfig::chunks(uint64_t(k_const)*k_const,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(uint64_t(k_const)*k_const,KonaBenchConfig::MUL_CHUNK);
     }
     const double setup_ms=std::chrono::duration<double,std::milli>(Clock::now()-setup_start).count();
     cout<<std::fixed<<std::setprecision(9)
@@ -1437,8 +1438,8 @@ int run(int argc,const char** argv) {
         const uint64_t comparisons=uint64_t(k_const)*n-uint64_t(k_const)*(k_const+1)/2;
         uint64_t compare_chunks=0,swap_chunks=0,depth=0;
         for(const auto& plan:topk_plans)for(const auto& level:plan){
-            ++depth;compare_chunks+=(level.idx.size()/2+16383)/16384;
-            swap_chunks+=(level.idx.size()+16383)/16384;
+            ++depth;compare_chunks+=KonaBenchConfig::chunks(level.idx.size()/2,KonaBenchConfig::DCF_CHUNK);
+            swap_chunks+=KonaBenchConfig::chunks(level.idx.size(),KonaBenchConfig::MUL_CHUNK);
         }
         const uint64_t logical_rounds=2*depth;
         const bool accounting=delta.sent==72*comparisons &&
@@ -1453,7 +1454,7 @@ int run(int argc,const char** argv) {
         cout<<"measurement_mode=topk_only_shares_ready_to_selected_shares_ready"
             <<"\ntopk_share_check="<<(correct?"PASS":"FAIL")
             <<"\ntopk_compare_swaps="<<comparisons<<"\nnetwork_layers="<<depth
-            <<"\ncompare_chunk_size=16384\nswap_chunk_size=16384"
+            <<"\ncompare_chunk_size="<<KonaBenchConfig::DCF_CHUNK<<"\nswap_chunk_size="<<KonaBenchConfig::MUL_CHUNK
             <<"\ntopk_compare_chunks="<<compare_chunks<<"\ntopk_swap_chunks="<<swap_chunks
             <<"\ntopk_expected_exchange_rounds="<<selected_rounds
             <<"\ntopk_theoretical_logical_rounds="<<logical_rounds
@@ -1502,9 +1503,17 @@ int run(int argc,const char** argv) {
             const auto top=ends[i].comm-begin.comm;
             const auto frequency=frequency_ends[i].comm-vote_begin[i].comm;
             const auto maximum=vote_ends[i].comm-frequency_ends[i].comm;
-            accounting=accounting&&top.sent==72*c&&actions(top)==4*topk_layers(n,k)&&uint64_t(ends[i].calls-begin.calls)==2*c&&
-                frequency.sent==24*k*k&&actions(frequency)==4&&uint64_t(frequency_ends[i].calls-vote_begin[i].calls)==2*k*k&&
-                maximum.sent==72*(k-1)&&actions(maximum)==4*network_layers(k)&&uint64_t(vote_ends[i].calls-frequency_ends[i].calls)==2*(k-1);
+            uint64_t top_exchanges=2*topk_layers(n,k);
+            uint64_t freq_exchanges=2,max_exchanges=2*network_layers(k);
+            if(optimized){
+                top_exchanges=0;
+                for(size_t j=0;j<k;++j)top_exchanges+=cached_rounds(topk_plans[j]);
+                freq_exchanges=KonaBenchConfig::chunks(k*k,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(k*k,KonaBenchConfig::MUL_CHUNK);
+                max_exchanges=cached_rounds(checkpoint_vote_plans[i]);
+            }
+            accounting=accounting&&top.sent==72*c&&actions(top)==2*top_exchanges&&uint64_t(ends[i].calls-begin.calls)==2*c&&
+                frequency.sent==24*k*k&&actions(frequency)==2*freq_exchanges&&uint64_t(frequency_ends[i].calls-vote_begin[i].calls)==2*k*k&&
+                maximum.sent==72*(k-1)&&actions(maximum)==2*max_exchanges&&uint64_t(vote_ends[i].calls-frequency_ends[i].calls)==2*(k-1);
             correct=correct&&clear[i]==plain_winner(reference,k);
             phase("topk",begin,ends[i],2*topk_layers(n,k),k);
             phase("vote_frequency",vote_begin[i],frequency_ends[i],2,k);
@@ -1571,16 +1580,16 @@ int run(int argc,const char** argv) {
             for(int i=0;i<k_const;++i)topk_ok=topk_ok&&clear[2*i]==reference[n-1-i][0]&&clear[2*i+1]==reference[n-1-i][1];
             correct=correct&&topk_ok;cout<<"topk_share_check="<<(topk_ok?"PASS":"FAIL")<<'\n';
         }
-        phase("topk",selection_begin,topk_end,selected_rounds);
-        phase("vote_frequency",topk_end,frequency_end,frequency_rounds);
-        phase("vote_max",frequency_end,max_end,max_rounds);
-        phase("vote",topk_end,max_end,frequency_rounds+max_rounds);
+        phase("topk",selection_begin,topk_end,2*topk_layers(n,k_const));
+        phase("vote_frequency",topk_end,frequency_end,2);
+        phase("vote_max",frequency_end,max_end,2*network_layers(k_const));
+        phase("vote",topk_end,max_end,2+2*network_layers(k_const));
         phase("online_other",max_end,end,0);
         if(scope=="full"){
             phase("distance",start,selection_begin,0);
-            phase("knn_online",start,end,selected_rounds+frequency_rounds+max_rounds);
+            phase("knn_online",start,end,2*topk_layers(n,k_const)+2+2*network_layers(k_const));
         }
-        phase("topk_vote_online",selection_begin,end,selected_rounds+frequency_rounds+max_rounds);
+        phase("topk_vote_online",selection_begin,end,2*topk_layers(n,k_const)+2+2*network_layers(k_const));
     }
     cout<<"topk_compare_swaps="<<(scope=="distance"?0:comparisons)
         <<"\nvote_frequency_compare_pairs="<<(scope=="distance"?0:k_const*k_const)
@@ -1678,6 +1687,7 @@ struct TrialResult
     uint64_t seed = 0;
     size_t threshold = 0;
 
+    uint64_t theoretical_rounds = 0;
     size_t comparator_count = 0;
     size_t structural_depth = 0;
 
@@ -1859,10 +1869,10 @@ void parse_argv(
     opt.add("20260819", 0, 1, 0, "Deterministic input seed",
             "-s", "--seed");
 
-    opt.add("180", 0, 1, 0,
+    opt.add(to_string(KonaBenchConfig::LAN_THRESHOLD).c_str(), 0, 1, 0,
             "LAN comparator threshold; <= threshold uses DCF",
             "", "--lan-threshold");
-    opt.add("6000", 0, 1, 0,
+    opt.add(to_string(KonaBenchConfig::WAN_THRESHOLD).c_str(), 0, 1, 0,
             "WAN comparator threshold; <= threshold uses DCF",
             "", "--wan-threshold");
     opt.add("0", 0, 1, 0,
@@ -1958,6 +1968,9 @@ void parse_argv(
         throw runtime_error("unknown mode: " + mode);
     if (profile != "lan" && profile != "wan")
         throw runtime_error("network-profile must be lan or wan");
+    // Resolve once for every entry, after legacy mode aliases are normalized.
+    policy.comparator_override = comparator_name == "pcr" ? KonaReducedDepthHybrid::Backend::PCR :
+        comparator_name == "dcf" ? KonaReducedDepthHybrid::Backend::DCF : KonaReducedDepthHybrid::Backend::AUTO;
 }
 
 void record_stage(
@@ -2163,8 +2176,7 @@ TrialResult run_protocol(
     using KonaReducedDepthCongTopK::execute_cong;
     using KonaReducedDepthCongTopK::execute_terminal;
     using KonaReducedDepthCongTopK::execute_topk;
-    if (comparator_name == "pcr") policy.comparator_override = Backend::PCR;
-    if (comparator_name == "dcf") policy.comparator_override = Backend::DCF;
+
     const bool original = mode == "old-hybrid";
     const bool after_block = mode == "reverse-prefilter-matrix-after-block";
     const bool terminal_only = timing_scope == "terminal" || after_block ||
@@ -2254,6 +2266,10 @@ TrialResult run_protocol(
     const auto end=chrono::steady_clock::now();
     const auto comm1=player->total_comm(); const auto res1=resource_snapshot();
     r.online=phase_delta(start,end,comm0,comm1);
+    // Derived after online timing; empty/local stages contribute zero.
+    for(const auto& stage:records)if(stage.comparators)
+        r.theoretical_rounds+=(stage.backend==Backend::PCR?8:1)+
+            (stage.phase=="matrix_rank"||stage.phase=="rank_mask"?0:1);
     r.compute_seconds=r.online.total_seconds-r.online.comm_seconds;
     r.resources=resource_delta(res0,res1);
     r.dcf_evaluate_calls=dcf.get_stats().evaluate_calls;
@@ -2302,13 +2318,13 @@ TrialResult run_protocol(
              << " backend=DCF_OPTIMIZED output_scope=winner_label_share tie_rule=smallest_public_label"
              << " compare_predicates=" << vote_shape.comparators() << " mul_items=" << vote_shape.mul_items
              << " public_all_selected=" << vote_shape.public_all_selected
-             << " theoretical_rounds=" << vote_shape.exchanges()
+             << " theoretical_rounds=" << vote_shape.logical_rounds()
              << " dcf_evaluate_calls=" << vote_calls
              << " accounting_check=" << (vote_accounting?"PASS":"FAIL")
              << " online_ms=" << vote_stats.total_seconds*1000
              << " sent_bytes=" << vote_stats.sent_bytes
-             << " transport_rounds=" << vote_stats.transport_events
-             << " logical_rounds=" << vote_stats.transport_actions
+             << " transport_actions=" << vote_stats.transport_events
+             << " exchange_rounds=" << vote_stats.transport_actions
              << " correctness=" << (pass?"PASS":"FAIL") << endl;
     }
     r.correctness=valid?"PASS":"FAIL";
@@ -2381,14 +2397,9 @@ void print_result(const TrialResult& r, const char* record_name = "RESULT")
          << " compute_ms=" << r.compute_seconds * 1000.0
          << " comm_ms=" << r.online.comm_seconds * 1000.0
          << " sent_bytes=" << r.online.sent_bytes
-         << " transport_events=" << r.online.transport_events
-         << " transport_actions=" << r.online.transport_actions
-         // transport_rounds is the raw number of one-way send/receive
-         // actions.  logical_rounds is the number of complete paired
-         // exchanges.  structural_depth is reported separately above and
-         // must not be used as a communication count.
-         << " transport_rounds=" << r.online.transport_events
-         << " logical_rounds=" << r.online.transport_actions
+         << " transport_actions=" << r.online.transport_events
+         << " exchange_rounds=" << r.online.transport_actions
+         << " theoretical_rounds=" << r.theoretical_rounds
 
          << " dcf_evaluate_calls=" << r.dcf_evaluate_calls
          << " dcf_evaluate_ms=" << r.dcf_evaluate_seconds * 1000.0
@@ -2432,10 +2443,11 @@ void print_stage_records(
              << " stage_ms=" << s.stats.total_seconds * 1000.0
              << " stage_comm_ms=" << s.stats.comm_seconds * 1000.0
              << " sent_bytes=" << s.stats.sent_bytes
-             << " transport_events=" << s.stats.transport_events
-             << " transport_actions=" << s.stats.transport_actions
-             << " transport_rounds=" << s.stats.transport_events
-             << " logical_rounds=" << s.stats.transport_actions
+             << " transport_actions=" << s.stats.transport_events
+             << " exchange_rounds=" << s.stats.transport_actions
+             << " theoretical_rounds=" << (s.comparators ?
+                    (s.backend==KonaReducedDepthHybrid::Backend::PCR?8:1)+
+                    (s.phase=="matrix_rank"||s.phase=="rank_mask"?0:1) : 0)
              << endl;
     }
 }
@@ -2557,7 +2569,7 @@ namespace {
 using SharedClock = std::chrono::steady_clock;
 struct SharedMetric {
     PhaseStats comm;
-    uint64_t dcf_calls=0,comparators=0,pcr=0,dcf=0;
+    uint64_t dcf_calls=0,comparators=0,pcr=0,dcf=0,logical=0;
     double dcf_ms=0;
 };
 SharedMetric add_metric(SharedMetric a,const SharedMetric& b) {
@@ -2565,7 +2577,7 @@ SharedMetric add_metric(SharedMetric a,const SharedMetric& b) {
     a.comm.sent_bytes+=b.comm.sent_bytes;a.comm.transport_events+=b.comm.transport_events;
     a.comm.transport_actions+=b.comm.transport_actions;
     a.dcf_calls+=b.dcf_calls;a.dcf_ms+=b.dcf_ms;a.comparators+=b.comparators;
-    a.pcr+=b.pcr;a.dcf+=b.dcf;return a;
+    a.pcr+=b.pcr;a.dcf+=b.dcf;a.logical+=b.logical;return a;
 }
 template<class F>
 SharedMetric measure_shared(RealTwoPartyPlayer* p,KonaDcfCompare::Compare64<64>& dcf,F operation) {
@@ -2579,8 +2591,8 @@ SharedMetric measure_shared(RealTwoPartyPlayer* p,KonaDcfCompare::Compare64<64>&
 void print_shared_phase(const char* name,int k,const SharedMetric& m,bool composed=true,long long theoretical_rounds=-1) {
     cout<<"BENCH_PHASE phase="<<name<<" k="<<k<<" party="<<playerno<<" trial=1"
         <<" online_ms="<<m.comm.total_seconds*1000<<" sent_bytes="<<m.comm.sent_bytes
-        <<" transport_rounds="<<m.comm.transport_events<<" exchange_rounds="<<m.comm.transport_actions
-        <<" theoretical_rounds="<<theoretical_rounds<<" dcf_evaluate_calls="<<m.dcf_calls<<" dcf_evaluate_ms="<<m.dcf_ms
+        <<" transport_actions="<<m.comm.transport_events<<" exchange_rounds="<<m.comm.transport_actions
+        <<" theoretical_rounds="<<(theoretical_rounds<0?m.logical:theoretical_rounds)<<" dcf_evaluate_calls="<<m.dcf_calls<<" dcf_evaluate_ms="<<m.dcf_ms
         <<" comparators="<<m.comparators<<" pcr_comparators="<<m.pcr<<" dcf_comparators="<<m.dcf
         <<" timing_kind="<<(composed&&(string(name)=="topk"||string(name)=="block_cong")?"composed_shared_stages":"measured_stage")<<'\n';
 }
@@ -2646,9 +2658,10 @@ int run(int argc,const char** argv) {
         <<"\ntrain_count="<<n<<"\nfeatures="<<features<<"\nquery_count=1\nk="<<*max_element(ks.begin(),ks.end())
         <<"\nnetwork_env="<<profile<<"\nmeasurement_mode=shared_exact_layer_prefixes"
         <<"\nlan_threshold="<<policy.lan_threshold<<"\nwan_threshold="<<policy.wan_threshold
+        <<"\ncomparator_override="<<comparator_name<<"\nmatrix_backend_override="<<matrix_backend
         <<"\neffective_threshold="<<policy.threshold_for(profile)
         <<"\nsetup_ms="<<chrono::duration<double,milli>(SharedClock::now()-setup0).count()
-        <<"\nrounds_definition=send_receive_actions_div_2\ntheoretical_rounds_status=NOT_DERIVED"
+        <<"\nrounds_definition=send_receive_actions_div_2\ntheoretical_rounds_status=DEPENDENCY_STAGES_WITHOUT_CHUNKS"
         <<"\nknn_online_e2e_ms=NOT_MEASURED\ntopk_vote_online_ms=NOT_MEASURED\n";
     SharedMetric unique;
     std::function<void(int,const vector<SharePair<64>>&,SharedMetric)> visit;
@@ -2664,6 +2677,7 @@ int run(int argc,const char** argv) {
             });
             m.comparators=nodes[child].indices.size()/2;
             if(backend==KonaReducedDepthHybrid::Backend::PCR)m.pcr=m.comparators;else m.dcf=m.comparators;
+            m.logical=m.comparators?(m.pcr?8:1)+1:0;
             nodes[child].metric=m;unique=add_metric(unique,m);
             visit(child,work,add_metric(cumulative,m));
         }
@@ -2676,6 +2690,7 @@ int run(int argc,const char** argv) {
             KonaReducedDepthHybrid::Backend backend;
             auto m=measure_shared(player,dcf,[&]{backend=operation();});m.comparators=count;
             if(backend==KonaReducedDepthHybrid::Backend::PCR)m.pcr=count;else m.dcf=count;
+            m.logical=count?(m.pcr?8:1)+(string(phase)=="matrix_rank"||string(phase)=="rank_mask"?0:1):0;
             observed=add_metric(observed,m);
             c.terminal_records.push_back(StageRecord{phase,stage,count,backend,m.comm});
         };
@@ -2684,7 +2699,7 @@ int run(int argc,const char** argv) {
             auto candidates=KonaReducedDepthCongTopK::collect_block_candidates<64>(c.finished_work,c.plan.plan,c.plan.block_offsets);
             c.output=KonaReducedDepthCongTopK::execute_terminal<64>(std::move(candidates),c.terminal,c.k,profile,policy,dcf,player,observe);
         });
-        c.tail.comparators=observed.comparators;c.tail.pcr=observed.pcr;c.tail.dcf=observed.dcf;
+        c.tail.logical=observed.logical;c.tail.comparators=observed.comparators;c.tail.pcr=observed.pcr;c.tail.dcf=observed.dcf;
         accounting=accounting&&c.block.comparators==c.plan.plan.block_comparators&&
             observed.comparators==c.terminal.comparators&&observed.comm.sent_bytes==c.tail.comm.sent_bytes&&
             observed.comm.transport_events==c.tail.comm.transport_events&&observed.dcf_calls==c.tail.dcf_calls;
@@ -2710,7 +2725,7 @@ int run(int argc,const char** argv) {
         const auto clear=reveal_values({c.winner},player);
         valid=valid&&clear[0]==uint64_t(distance(counts.begin(),max_element(counts.begin(),counts.end())));
         print_shared_phase("block_cong",c.k,c.block);print_shared_phase("terminal",c.k,c.tail);
-        print_shared_phase("topk",c.k,add_metric(c.block,c.tail));print_shared_phase("vote",c.k,c.vote,false,c.vote_shape.exchanges());
+        print_shared_phase("topk",c.k,add_metric(c.block,c.tail));print_shared_phase("vote",c.k,c.vote,false,c.vote_shape.logical_rounds());
         cout<<"CASE k="<<c.k<<" vote_backend=DCF_OPTIMIZED vote_mul_items="<<c.vote_shape.mul_items
             <<" vote_public_all_selected="<<c.vote_shape.public_all_selected
             <<" vote_single_selected="<<c.vote_shape.single_selected<<" vote_direct_label="<<c.vote_shape.direct_label<<" candidate_lmax="<<c.plan.plan.lmax
@@ -2725,13 +2740,13 @@ int run(int argc,const char** argv) {
             cout<<"TERMINAL_LEVEL k="<<c.k<<" phase="<<r.phase<<" stage="<<r.stage_id
                 <<" comparators="<<r.comparators<<" backend="<<KonaReducedDepthHybrid::backend_name(r.backend)
                 <<" online_ms="<<r.stats.total_seconds*1000<<" sent_bytes="<<r.stats.sent_bytes
-                <<" transport_rounds="<<r.stats.transport_events<<" exchange_rounds="<<r.stats.transport_actions<<'\n';
+                <<" transport_actions="<<r.stats.transport_events<<" exchange_rounds="<<r.stats.transport_actions<<'\n';
     }
     for(size_t id=1;id<nodes.size();++id) {
         const auto& m=nodes[id].metric;
         cout<<"SHARED_NODE id="<<id<<" parent="<<nodes[id].parent<<" execution_count=1 comparators="<<m.comparators
             <<" backend="<<(m.pcr?"PCR":"DCF")<<" online_ms="<<m.comm.total_seconds*1000
-            <<" sent_bytes="<<m.comm.sent_bytes<<" transport_rounds="<<m.comm.transport_events
+            <<" sent_bytes="<<m.comm.sent_bytes<<" transport_actions="<<m.comm.transport_events
             <<" exchange_rounds="<<m.comm.transport_actions<<'\n';
     }
     accounting=accounting&&nodes.size()-1<=independent_layers&&unique.comparators<=independent_comparators;
@@ -2801,7 +2816,7 @@ int run(int argc,const char** argv) {
         <<"\nouter_partition_cancelled="<<prepared.plan.outer_partition_cancelled<<"\nvote_public_all_selected="<<all_selected
         <<"\nvote_mul_items="<<shape.mul_items<<"\nvote_single_selected="<<shape.single_selected
         <<"\nsetup_and_validation_ms="<<chrono::duration<double,milli>(chrono::steady_clock::now()-setup0).count()-metric.comm.total_seconds*1000<<'\n';
-    hybrid_shared_engine::print_shared_phase("vote",k,metric,false,shape.exchanges());
+    hybrid_shared_engine::print_shared_phase("vote",k,metric,false,shape.logical_rounds());
     cout<<"output_scope=winning_label_secret_share\nrevealed_winner="<<clear<<"\nexpected_label="<<expected
         <<"\naccounting_check="<<(accounting?"PASS":"FAIL")<<"\ncorrectness="<<(valid?"PASS":"FAIL")
         <<"\ntest_status="<<(accounting&&valid?"COMPLETED":"FAILED")<<endl;
@@ -2853,7 +2868,7 @@ int run(int argc,const char** argv) {
         const bool pcr=backend==KonaReducedDepthHybrid::Backend::PCR;
         shape.comparators+=count;if(pcr)shape.pcr+=count;else shape.dcf+=count;
         shape.bytes+=(pcr?70:8)*count+(swaps?64*count:0);
-        shape.exchanges+=(pcr?7:0)+(count+16383)/16384+(swaps?(2*count+16383)/16384:0);
+        shape.exchanges+=(pcr?7:0)+KonaBenchConfig::chunks(count,pcr?KonaBenchConfig::MUL_CHUNK:KonaBenchConfig::DCF_CHUNK)+(swaps?KonaBenchConfig::chunks(2*count,KonaBenchConfig::MUL_CHUNK):0);
         shape.logical+=(pcr?8:1)+(swaps?1:0);
     };
     sync_outside_timer(player);
@@ -2879,14 +2894,7 @@ int run(int argc,const char** argv) {
     for(auto* m:{&block,&tail}){topk_other.comm.total_seconds-=m->comm.total_seconds;
         topk_other.comm.comm_seconds-=m->comm.comm_seconds;topk_other.comm.sent_bytes-=m->comm.sent_bytes;
         topk_other.comm.transport_events-=m->comm.transport_events;topk_other.comm.transport_actions-=m->comm.transport_actions;}
-    uint64_t vote_logical=vote_shape.single_selected?1:0;
-    if(vote_shape.count_predicates){
-        vote_logical=1+(vote_shape.public_all_selected?0:1);
-        for(size_t size=vote_labels,layer=0;size>1;size=(size+1)/2,++layer){
-            const size_t pairs=size/2;const size_t muls=((size+1)/2>1?pairs:0)+(layer>0?pairs:0);
-            vote_logical+=1+(muls>0?1:0);
-        }
-    }
+    const uint64_t vote_logical=vote_shape.logical_rounds();
     vote.comparators=vote_shape.comparators();vote.dcf=vote.comparators;
     SharedMetric total;total.comm=phase_delta(t0,t1,c0,c1);
     total.dcf_calls=dist.dcf_calls+topk.dcf_calls+vote.dcf_calls;
@@ -2921,6 +2929,7 @@ int run(int argc,const char** argv) {
         <<"\nblock_count="<<prepared.plan.blocks.size()<<"\ncandidate_lmax="<<prepared.plan.lmax
         <<"\nvote_candidate_count="<<output.candidates.size()<<"\nvote_class_count="<<vote_labels
         <<"\nlan_threshold="<<policy.lan_threshold<<"\nwan_threshold="<<policy.wan_threshold
+        <<"\ncomparator_override="<<comparator_name<<"\nmatrix_backend_override="<<matrix_backend
         <<"\neffective_threshold="<<policy.threshold_for(profile)
         <<"\ninput_preparation=local-zero-auxiliary-aby2-inputs"
         <<"\npartition_rule=original-formula-and-4k-gt-Lmax-cutoff"
@@ -2980,19 +2989,19 @@ int run(int argc,const char** argv) {
     if(scope!="distance")for(const auto& layer:plan.layers){
         const size_t pairs=layer.size()/2;if(!pairs)continue;
         top_logical+=189; // 187 packed AND stages + B2A + swap, before chunk expansion.
-        for(size_t offset=0;offset<pairs;offset+=16384){
-            const size_t count=std::min<size_t>(16384,pairs-offset);
+        for(size_t offset=0;offset<pairs;offset+=KonaBenchConfig::MUL_CHUNK){
+            const size_t count=std::min<size_t>(KonaBenchConfig::MUL_CHUNK,pairs-offset);
             expected_top_bytes+=2992*((count+63)/64)+80*count;
-            expected_top_exchanges+=188+(2*count+16383)/16384;
+            expected_top_exchanges+=188+KonaBenchConfig::chunks(2*count,KonaBenchConfig::MUL_CHUNK);
         }
     }
     const uint64_t frequency_predicates=2*uint64_t(domain)*k;
     const uint64_t expected_frequency_bytes=32*uint64_t(domain)*k;
-    const uint64_t expected_frequency_exchanges=(frequency_predicates+16383)/16384+(uint64_t(domain)*k+16383)/16384;
+    const uint64_t expected_frequency_exchanges=KonaBenchConfig::chunks(frequency_predicates,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(uint64_t(domain)*k,KonaBenchConfig::MUL_CHUNK);
     uint64_t expected_max_exchanges=0,max_logical=0;
     for(size_t count=domain;count>1;count=(count+1)/2){
         const size_t pairs=count/2;max_logical+=2;
-        expected_max_exchanges+=(pairs+16383)/16384+(2*pairs+16383)/16384;
+        expected_max_exchanges+=KonaBenchConfig::chunks(pairs,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(2*pairs,KonaBenchConfig::MUL_CHUNK);
     }
 
     vector<KonaNhssCongPipeline::RecordShare> database;
@@ -3076,7 +3085,7 @@ int run(int argc,const char** argv) {
         <<"\ninput_preparation="<<(scope=="topk-vote"?"plaintext_distance_fixture":"NHSS_offline_shares")
         <<"\ntopk_rmsb_comparators="<<rmsb_pairs<<"\ntopk_dcf_comparators=0"
         <<"\ntopk_expected_payload_bytes="<<expected_top_bytes<<"\ntopk_expected_exchange_rounds="<<expected_top_exchanges
-        <<"\ntopk_theoretical_logical_rounds="<<top_logical<<"\ncompare_chunk_size=16384\nswap_chunk_size=16384"<<'\n';
+        <<"\ntopk_theoretical_logical_rounds="<<top_logical<<"\ncompare_chunk_size="<<KonaBenchConfig::DCF_CHUNK<<"\nswap_chunk_size="<<KonaBenchConfig::MUL_CHUNK<<'\n';
     if(scope!="topk-vote")print_shared_phase("distance",k,dist,false,0);
     if(scope!="distance") {
         for(size_t l=0;l<plan.layers.size();++l)cout<<"SHAO_LAYER layer="<<l<<" pairs="<<plan.layers[l].size()/2
@@ -3138,8 +3147,6 @@ int main(int argc,char** argv) {
                 if(scope!="shared"&&scope!="full"&&scope!="topk"&&scope!="terminal"&&scope!="vote")throw runtime_error("hybrid scope must be full/shared/topk/terminal/vote");
                 auto has=[&](const string& a,const string& b){return find(args.begin(),args.end(),a)!=args.end()||find(args.begin(),args.end(),b)!=args.end();};
                 if(!has("-m","--mode")){args.push_back("-m");args.push_back("pruned");}
-                if(!has("--lan-threshold","--lan-threshold")){args.push_back("--lan-threshold");args.push_back("180");}
-                if(!has("--wan-threshold","--wan-threshold")){args.push_back("--wan-threshold");args.push_back("6000");}
                 if((scope=="full"||scope=="shared"||scope=="vote")&&!has("--vote-labels","--vote-labels")){args.push_back("--vote-labels");args.push_back("2");}
                 args.push_back("--scope");args.push_back(scope=="terminal"?"terminal":"topk");
             }else throw runtime_error("unknown scheme "+scheme);

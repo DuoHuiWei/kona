@@ -48,7 +48,7 @@ import uuid
 ROOT=Path(__file__).resolve().parents[1];REMOTE='/usr/src/Garnet'
 TARGET='matrix-block-count-bench.x';METHODS=['FullMat','PCM'];BLOCKS=[2,4,8,16,32]
 PHASES=['rank_matrix','rank_mask','matrix_other','matrix','vote','online_other','matrix_vote_online']
-METRICS=['online_ms','sent_bytes','transport_rounds','exchange_rounds','theoretical_rounds','dcf_evaluate_calls','comparators','dcf_comparators','pcr_comparators']
+METRICS=['online_ms','sent_bytes','transport_actions','exchange_rounds','theoretical_rounds','dcf_evaluate_calls','comparators','dcf_comparators','pcr_comparators']
 def docker(*args):return sp.check_output(['docker','exec','kona-dev',*args],text=True)
 def sources():
     files=['Machines/matrix-block-count-bench.cpp','Scripts/run-matrix-block-count.py','Makefile',
@@ -101,7 +101,7 @@ def collect(texts,b,trial,profile,info):
                     actual=cast(phases[r['method'],total][metric]);expected=sum(cast(phases[r['method'],p][metric]) for p in leaves)
                     assert abs(actual-expected)<=(1e-5 if metric=='online_ms' else 0),(total,metric)
             cases.append(dict(**r,fixture_checksum=meta['fixture_checksum'],fixture_and_setup_ms=meta['fixture_and_setup_ms']))
-        assert all(int(r['transport_rounds'])==2*int(r['exchange_rounds']) for r in phases.values())
+        assert all(int(r['transport_actions'])==2*int(r['exchange_rounds']) for r in phases.values())
         assert all(math.isfinite(float(r['online_ms'])) and float(r['online_ms'])>=0 for r in phases.values())
     assert parsed[0][0]['fixture_checksum']==parsed[1][0]['fixture_checksum']
     assert parsed[0][0]['candidate_checksum']==parsed[1][0]['candidate_checksum']

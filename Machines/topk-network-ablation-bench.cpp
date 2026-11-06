@@ -92,7 +92,7 @@ CachedPlan prepare_cached_top_one(int size){
     }return plan;
 }
 uint64_t cached_rounds(const CachedPlan& plan){uint64_t n=0;for(const auto& l:plan){
-    size_t pairs=l.idx.size()/2;n+=(pairs+16383)/16384+(2*pairs+16383)/16384;}return n;}
+    size_t pairs=l.idx.size()/2;n+=KonaBenchConfig::chunks(pairs,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(2*pairs,KonaBenchConfig::MUL_CHUNK);}return n;}
 void cached_top_one(vector<Pair>& rows,CachedPlan& plan,bool minimum){
     for(auto& l:plan){cached_dcf->compare_in_vec(rows,l.idx,l.bits,!minimum);
         KonaCongKonaAdapter::ss_vec_kona_l2<64>(rows,l.idx,l.bits,player);}
@@ -140,7 +140,7 @@ struct Shape {
     void add(size_t pairs,bool swap) {
         comparisons+=pairs;if(swap)swaps+=pairs;
         bytes+=8*pairs+(swap?64*pairs:0);
-        exchanges+=(pairs+16383)/16384+(swap?(2*pairs+16383)/16384:0);
+        exchanges+=KonaBenchConfig::chunks(pairs,KonaBenchConfig::DCF_CHUNK)+(swap?KonaBenchConfig::chunks(2*pairs,KonaBenchConfig::MUL_CHUNK):0);
         logical+=1+(swap?1:0);
     }
 };
@@ -148,7 +148,7 @@ void print_phase(const char* phase,const string& structure,int trial,int k,int p
         const SharedMetric& m,uint64_t logical,uint64_t compares,uint64_t swaps,bool composed=false) {
     cout<<"ABLATION_PHASE phase="<<phase<<" structure="<<structure<<" trial="<<trial
         <<" k="<<k<<" party="<<party<<" online_ms="<<m.comm.total_seconds*1000
-        <<" sent_bytes="<<m.comm.sent_bytes<<" transport_rounds="<<m.comm.transport_events
+        <<" sent_bytes="<<m.comm.sent_bytes<<" transport_actions="<<m.comm.transport_events
         <<" exchange_rounds="<<m.comm.transport_actions<<" theoretical_rounds="<<logical
         <<" dcf_evaluate_calls="<<m.dcf_calls<<" comparators="<<compares<<" swaps="<<swaps
         <<" timing_kind="<<(composed?"composed_shared_stages":"measured")<<'\n';
@@ -162,14 +162,8 @@ Shape add_shape(Shape a,const Shape& b){
     a.comparisons+=b.comparisons;a.swaps+=b.swaps;a.bytes+=b.bytes;
     a.exchanges+=b.exchanges;a.logical+=b.logical;return a;
 }
-uint64_t vote_logical(const KonaMaskVote::DcfVoteStats& s,int classes){
-    if(s.single_selected)return 1;
-    if(!s.count_predicates)return 0;
-    uint64_t rounds=1+(s.public_all_selected?0:1);
-    for(size_t size=classes,layer=0;size>1;size=(size+1)/2,++layer){
-        size_t pairs=size/2,muls=((size+1)/2>1?pairs:0)+(layer>0?pairs:0);
-        rounds+=1+(muls>0?1:0);
-    }return rounds;
+uint64_t vote_logical(const KonaMaskVote::DcfVoteStats& s,int /*classes*/){
+    return s.logical_rounds();
 }
 
 // Reuse only actual shared execution. DQ checkpoints accumulate measured
@@ -282,7 +276,7 @@ void run_shared(const vector<Pair>& fixture,const vector<array<uint64_t,2>>& cle
                         vector<Pair> counts;cached_label_counts(labels,counts);cached_top_one(counts,p.dq_vote,false);winner=counts[k-1][1];
                     });
                     emit("DQ",k,prefix.metric,prefix.shape,vote,uint64_t(k)*k+k-1,24ULL*k*k+72ULL*(k-1),
-                        2*((uint64_t(k)*k+16383)/16384)+cached_rounds(p.dq_vote),2+2*p.dq_vote.size(),
+                        (KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::MUL_CHUNK))+cached_rounds(p.dq_vote),2+2*p.dq_vote.size(),
                         add_metric(prefix.metric,vote),prefix.output,winner,true);
                 }else if(group==1){
                     auto work=fixture;Output out;Shape shape;Ring winner;KonaMaskVote::DcfVoteStats vs;SharedMetric selection,vote;
@@ -459,7 +453,7 @@ int run(int argc,const char** argv) {
             total.comm=ablation_helpers::phase_delta(t0,t1,c0,c1);total.dcf_calls=selection.dcf_calls+vote.dcf_calls;
             const uint64_t vote_comparisons=structure=="DQ"?uint64_t(k)*k+k-1:vote_shape.comparators();
             const uint64_t vote_bytes=structure=="DQ"?24ULL*k*k+72ULL*(k-1):8*vote_shape.comparators()+16*vote_shape.mul_items;
-            const uint64_t vote_exchanges=structure=="DQ"?2*((uint64_t(k)*k+16383)/16384)+ablation_helpers::cached_rounds(dq_vote_plan):vote_shape.exchanges();
+            const uint64_t vote_exchanges=structure=="DQ"?(KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::MUL_CHUNK))+ablation_helpers::cached_rounds(dq_vote_plan):vote_shape.exchanges();
             const bool accounting=selection.comm.sent_bytes==predicted.bytes&&
                 selection.comm.transport_actions==predicted.exchanges&&selection.dcf_calls==2*predicted.comparisons&&
                 vote.comm.sent_bytes==vote_bytes&&vote.comm.transport_actions==vote_exchanges&&
@@ -478,14 +472,7 @@ int run(int argc,const char** argv) {
             sort(chosen.begin(),chosen.end());
             valid=valid&&chosen==vector<array<uint64_t,2>>(sorted.begin(),sorted.begin()+k)&&
                 ablation_helpers::reveal_values({winner},player)[0]==case_expected_winner;
-            uint64_t vote_logical=vote_shape.single_selected?1:0;
-            if(vote_shape.count_predicates){
-                vote_logical=1+(vote_shape.public_all_selected?0:1);
-                for(size_t size=classes,layer=0;size>1;size=(size+1)/2,++layer){
-                    size_t pairs=size/2,muls=((size+1)/2>1?pairs:0)+(layer>0?pairs:0);
-                    vote_logical+=1+(muls>0?1:0);
-                }
-            }
+            uint64_t vote_logical=vote_shape.logical_rounds();
             if(structure=="DQ")vote_logical=2+2*dq_vote_plan.size();
             print_phase("selection",structure,trial,k,party,selection,predicted.logical,predicted.comparisons,predicted.swaps);
             print_phase("vote",structure,trial,k,party,vote,vote_logical,vote_comparisons,0);

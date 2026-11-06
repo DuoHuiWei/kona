@@ -1,6 +1,7 @@
 #ifndef MACHINES_KONA_REDUCED_DEPTH_HYBRID_ADAPTER_HPP_
 #define MACHINES_KONA_REDUCED_DEPTH_HYBRID_ADAPTER_HPP_
 
+#include "kona-bench-config.hpp"
 #include <array>
 #include <cstddef>
 #include <stdexcept>
@@ -38,8 +39,8 @@ struct Policy
     // Interpretation:
     //   comparators <= threshold -> DCF
     //   comparators >  threshold -> PCR
-    size_t lan_threshold = 180;
-    size_t wan_threshold = 6000;
+    size_t lan_threshold = KonaBenchConfig::LAN_THRESHOLD;
+    size_t wan_threshold = KonaBenchConfig::WAN_THRESHOLD;
 
     // Optional hard override. 0 means "use profile threshold".
     size_t threshold_override = 0;

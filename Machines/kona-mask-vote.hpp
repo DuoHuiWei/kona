@@ -151,6 +151,8 @@ Z2<K> vote_with_pcr(const std::vector<SharePair<K>>& candidates,
 struct DcfVoteStats {
     uint64_t count_predicates=0,winner_predicates=0,mul_items=0;
     uint64_t compare_chunks=0,mul_chunks=0;
+    uint64_t compare_batches=0,mul_batches=0;
+    uint64_t logical_rounds() const {return compare_batches+mul_batches;}
     uint64_t exchanges() const {return compare_chunks+mul_chunks;}
     bool public_all_selected=false,direct_label=false,single_selected=false;
     uint64_t comparators() const {return count_predicates+winner_predicates;}
@@ -187,15 +189,15 @@ void label_counts_dcf_optimized(const std::vector<SharePair<K>>& candidates,
             values[2*j]=candidates[i][1];values[2*j+1]=threshold;
         }
     }
-    dcf.compare_in_vec(values,idx,bits,false,KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK);
-    if(stats){stats->count_predicates+=predicates;stats->compare_chunks+=(predicates+16383)/16384;}
+    dcf.compare_in_vec(values,idx,bits,false,KonaBenchConfig::DCF_CHUNK);
+    if(stats){stats->count_predicates+=predicates;++stats->compare_batches;stats->compare_chunks+=KonaBenchConfig::chunks(predicates,KonaBenchConfig::DCF_CHUNK);}
     std::vector<Z2<K>> weighted(predicates);
     for(size_t j=0;j<predicates;++j)weighted[j]=bits[2*j];
     if(!public_all_selected){
         std::vector<Z2<K>> expanded_mask(predicates),products;
         for(size_t j=0;j<predicates;++j)expanded_mask[j]=mask[j%n];
         KonaShareConversion::mul_vector_additive_kona_l2_chunked<K>(weighted,expanded_mask,products,player);
-        weighted.swap(products);if(stats){stats->mul_items+=predicates;stats->mul_chunks+=(predicates+16383)/16384;}
+        weighted.swap(products);if(stats){stats->mul_items+=predicates;++stats->mul_batches;stats->mul_chunks+=KonaBenchConfig::chunks(predicates,KonaBenchConfig::MUL_CHUNK);}
     }
     // F(c)=sum mask*[label<c]. F(0)=0; F(C)=total selected mask.
     // count(c)=F(c+1)-F(c); no opening or communication for the differences.
@@ -224,8 +226,8 @@ Z2<K> winner_dcf_optimized(std::vector<SharePair<K>> counts,
         std::vector<int> idx,next;idx.reserve(2*pairs);next.reserve(next_size);
         for(size_t p=0;p<pairs;++p){idx.push_back(active[2*p]);idx.push_back(active[2*p+1]);next.push_back(active[2*p]);}
         if(active.size()%2)next.push_back(active.back());
-        std::vector<Z2<K>> bits(idx.size());dcf.compare_in_vec(counts,idx,bits,false,KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK);
-        if(stats){stats->winner_predicates+=pairs;stats->compare_chunks+=(pairs+16383)/16384;}
+        std::vector<Z2<K>> bits(idx.size());dcf.compare_in_vec(counts,idx,bits,false,KonaBenchConfig::DCF_CHUNK);
+        if(stats){stats->winner_predicates+=pairs;++stats->compare_batches;stats->compare_chunks+=KonaBenchConfig::chunks(pairs,KonaBenchConfig::DCF_CHUNK);}
         const size_t absent=std::numeric_limits<size_t>::max();
         std::vector<size_t> count_slot(pairs,absent),label_slot(pairs,absent);
         std::vector<Z2<K>> differences,selectors,products;
@@ -238,7 +240,7 @@ Z2<K> winner_dcf_optimized(std::vector<SharePair<K>> counts,
         }
         if(!differences.empty()){
             KonaShareConversion::mul_vector_additive_kona_l2_chunked<K>(differences,selectors,products,player);
-            if(stats){stats->mul_items+=differences.size();stats->mul_chunks+=(differences.size()+16383)/16384;}
+            if(stats){stats->mul_items+=differences.size();++stats->mul_batches;stats->mul_chunks+=KonaBenchConfig::chunks(differences.size(),KonaBenchConfig::MUL_CHUNK);}
         }
         for(size_t p=0;p<pairs;++p){
             const int l=idx[2*p],r=idx[2*p+1];
@@ -278,7 +280,7 @@ Z2<K> vote_dcf_optimized(const std::vector<SharePair<K>>& candidates,
         KonaShareConversion::mul_vector_additive_kona_l2_chunked<K>(labels,mask,products,player);
         for(const auto& value:products)winner+=value;
         stats.single_selected=true;stats.mul_items=candidates.size();
-        stats.mul_chunks=(candidates.size()+16383)/16384;
+        stats.mul_batches=1;stats.mul_chunks=KonaBenchConfig::chunks(candidates.size(),KonaBenchConfig::MUL_CHUNK);
     }else{
         std::vector<SharePair<K>> counts;
         label_counts_dcf_optimized<K>(candidates,mask,classes,player,dcf,counts,public_all_selected,&stats);

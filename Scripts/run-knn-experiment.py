@@ -122,6 +122,11 @@ import uuid
 ROOT=Path(__file__).resolve().parents[1]
 REMOTE='/usr/src/Garnet'
 TARGET='knn-bench.x'
+# The same header supplies C++ protocol and Python launch defaults.
+CONFIG_HEADER=ROOT/'Machines/kona-bench-config.hpp'
+DEFAULTS={k:int(v) for k,v in re.findall(r'constexpr std::size_t (\w+) = (\d+);',CONFIG_HEADER.read_text())}
+if not {'DCF_CHUNK','MUL_CHUNK','LAN_THRESHOLD','WAN_THRESHOLD'} <= DEFAULTS.keys():
+    raise RuntimeError('Missing shared benchmark defaults in '+str(CONFIG_HEADER))
 KS=[1,2,3,5,20,100]
 
 # The observer runs in the existing container on CPU4, separate from P0/P1.
@@ -237,7 +242,7 @@ def write_csv(path,rows):
             w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
 
 def source_hashes():
-    names=['Machines/knn-bench.cpp','Scripts/run-knn-experiment.py','Makefile',
+    names=['Machines/kona-bench-config.hpp','Machines/knn-bench.cpp','Scripts/run-knn-experiment.py','Makefile',
         'Networking/Player.h','Networking/Player.cpp','Networking/Exchanger.h','Networking/sockets.cpp',
         'Tools/octetStream.h','Tools/octetStream.cpp',
         'Scripts/codex-container-build.sh','Scripts/container-network.sh','Scripts/kona-bench-log.sh',
@@ -336,7 +341,7 @@ def command_arguments(a,item):
     if item['bench_scheme']=='constantpp':args += ['--secmax-mode',a.secmax_mode]
     if item['bench_scheme']=='shao':args += ['--vote-labels',str(a.label_domain)]
     if item['bench_scheme']=='hybrid':args += ['-n',str(a.n),'-m','pruned','-r','1','--warmup','0',
-        '--comparator','hybrid','--matrix-backend','auto','--lan-threshold',str(a.lan_threshold),
+        '--comparator',a.comparator,'--matrix-backend',a.matrix_backend,'--lan-threshold',str(a.lan_threshold),
         '--wan-threshold',str(a.wan_threshold),'--vote-labels',str(a.label_domain)]
     return args
 
@@ -347,6 +352,8 @@ def parse(path,item):
     for line in text.splitlines():
         if line.startswith('BENCH_PHASE '):
             r=dict(v.split('=',1) for v in line.split()[1:]);key=(r['phase'],int(r.get('k',item['k'])))
+            if 'transport_actions' not in r and 'transport_rounds' in r:r['transport_actions']=r['transport_rounds']
+            if min(int(r['exchange_rounds']),int(r['theoretical_rounds']))<0:raise RuntimeError('Unknown/negative round count: '+str(key))
             if key in phases:raise RuntimeError(f'duplicate phase {key}: {path}')
             phases[key]=r
     for (phase,_),r in phases.items():
@@ -371,7 +378,7 @@ def expected(a,item):
     return {(p,k) for p in stages}
 
 def check_closure(phases,total,leaves,k):
-    for key in ['sent_bytes','transport_rounds','exchange_rounds']:
+    for key in ['sent_bytes','transport_actions','exchange_rounds','theoretical_rounds']:
         if sum(int(phases[p,k][key]) for p in leaves)!=int(phases[total,k][key]):raise RuntimeError(f'{total}: {key} closure failed')
     if abs(sum(float(phases[p,k]['online_ms']) for p in leaves)-float(phases[total,k]['online_ms']))>1e-5:
         raise RuntimeError(f'{total}: time closure failed')
@@ -388,18 +395,19 @@ def summarize(out,rows):
             cv=sd/mean if sd is not None and mean else None,min_ms=min(values),max_ms=max(values),
             mean_sent_bytes=statistics.mean(g['sent_bytes'] for g in group),timing_kind=group[0]['timing_kind'])
         for party in [0,1]:
-            for metric in ['online_ms','sent_bytes','transport_rounds','exchange_rounds','theoretical_rounds','dcf_evaluate_calls']:
+            for metric in ['online_ms','sent_bytes','transport_actions','exchange_rounds','theoretical_rounds','dcf_evaluate_calls']:
                 r[f'P{party}_{metric}_trials']=json.dumps([g[f'P{party}_{metric}'] for g in group])
         summary.append(r)
     write_csv(out/'summary.csv',summary)
     lines=['# KNN experiment results','',
         'Per-trial party max time/bytes, then group statistics. Both parties raw counts remain in CSV.',
         'Shared/checkpoint stage sums are composed; only knn_online in scope full is independently measured E2E.',
-        'exchange_rounds=transport actions/2; preserve protocol dependency-round distinctions.','',
-        '| Dataset | Part | k | Profile | Phase | Samples | Mean ms | SD ms | Mean bytes |',
-        '|---|---|---:|---|---|---:|---:|---:|---:|']
+        'Only two round metrics: theoretical_rounds=dependency stages without chunk expansion; exchange_rounds=actual communication exchanges. transport_actions is an internal action counter, NOT rounds.','',
+        '| Dataset | Part | k | Profile | Phase | Samples | Mean ms | SD ms | Mean bytes | Theoretical P0/P1 | Actual P0/P1 |',
+        '|---|---|---:|---|---|---:|---:|---:|---:|---|---|']
     for r in summary:
-        lines.append('| '+' | '.join(str(r[k]) for k in ['dataset','part','k','network_profile','phase','samples','mean_ms','sample_sd_ms','mean_sent_bytes'])+' |')
+        counters=[' / '.join(r[f'P{party}_{metric}_trials'] for party in [0,1]) for metric in ['theoretical_rounds','exchange_rounds']]
+        lines.append('| '+' | '.join([str(r[k]) for k in ['dataset','part','k','network_profile','phase','samples','mean_ms','sample_sd_ms','mean_sent_bytes']]+counters)+' |')
     (out/'summary.md').write_text('\n'.join(lines)+'\n')
 
 def main():
@@ -419,11 +427,15 @@ def main():
     p.add_argument('--timeout',type=int,default=3600)
     p.add_argument('--secmax-mode',choices=['paper-local-l2','legacy'],default='paper-local-l2')
     p.add_argument('--topk-mode',choices=['scalar'],default='scalar',help='Native SecKNN scan only; historical layered/tournament is disabled')
-    p.add_argument('--lan-threshold',type=int,default=180,help='Hybrid DCF/PCR cutoff; default 180, confirmed 2026-11-06')
-    p.add_argument('--wan-threshold',type=int,default=6000,help='Hybrid WAN cutoff; unchanged default 6000')
+    p.add_argument('--lan-threshold',type=int,default=DEFAULTS['LAN_THRESHOLD'],help='Hybrid LAN cutoff; default from kona-bench-config.hpp')
+    p.add_argument('--wan-threshold',type=int,default=DEFAULTS['WAN_THRESHOLD'],help='Hybrid WAN cutoff; default from kona-bench-config.hpp')
+    p.add_argument('--comparator',choices=['hybrid','dcf','pcr'],default='hybrid',help='Hybrid selection backend; optimized vote stays DCF')
+    p.add_argument('--matrix-backend',choices=['auto','dcf','pcr'],default='auto',help='Hybrid matrix ranking override only')
     p.add_argument('--output',type=Path)
     p.add_argument('--dry-run',action='store_true')
     a=p.parse_args();os.chdir(ROOT)
+    if (a.comparator!='hybrid' or a.matrix_backend!='auto') and (a.scheme!='hybrid' or a.scope!='full'):
+        p.error('Explicit selection backend overrides currently require --scheme hybrid --scope full')
     if not (0<a.lan_threshold<=2147483647 and 0<a.wan_threshold<=2147483647):p.error('hybrid thresholds must be positive 32-bit integers')
     if a.scope=='topk' and (a.scheme!='kona' or a.kona_backend!='batched-dcf'):p.error('--scope topk requires --scheme kona --kona-backend batched-dcf')
     if a.scope=='topk-vote' and a.scheme!='shao':p.error('--scope topk-vote currently supports shao only')
@@ -456,7 +468,7 @@ def main():
     if a.scheme=='constantpp' and a.scope=='experiment' and a.n<2:p.error('pre-vote requires N>1')
     manifest=dict(scheme=a.scheme,scope=a.scope,dataset=a.dataset,N=a.n,features=a.features,query_count=1,
         datasets=a.dataset_specs,kona_backend=a.kona_backend if a.scheme=='kona' else 'NOT_APPLICABLE',headline_e2e_only=a.e2e_only,planned_pairs=len(jobs),schedule=jobs,cpu_affinity=[0,2],core_exclusivity='NOT_VERIFIED',warmup_trials=0,
-        secmax_mode=a.secmax_mode,topk_mode=a.topk_mode,hybrid_thresholds=dict(lan=a.lan_threshold,wan=a.wan_threshold),shao_network='rotated-msb-all-layers',shao_vote='batched-dcf',
+        secmax_mode=a.secmax_mode,topk_mode=a.topk_mode,comparator=a.comparator,matrix_backend=a.matrix_backend,chunk_limits=dict(dcf=DEFAULTS['DCF_CHUNK'],mul=DEFAULTS['MUL_CHUNK']),rounds_schema='theoretical_without_chunk_vs_actual_exchange',hybrid_thresholds=dict(lan=a.lan_threshold,wan=a.wan_threshold),shao_network='rotated-msb-all-layers',shao_vote='batched-dcf',
         monitoring=dict(enabled=a.monitor,observer_cpu=4,sample_seconds=5,network_probe_mib=64),
         phase_semantics='full=measured E2E; checkpoints/shared/distance+topk-vote=staged/composed')
     if a.dry_run:print(json.dumps(manifest,indent=2));return
@@ -579,6 +591,8 @@ for pid in matching():
                 if item['bench_scheme']=='constantpp' and item['scope'] in ['full','vote'] and meta.get('secmax_mode')!=a.secmax_mode:
                     raise RuntimeError('ConstantPP SecMax mode mismatch: requested '+a.secmax_mode+', got '+str(meta.get('secmax_mode')))
                 if a.scheme=='hybrid' and item['scope']=='full':
+                    if meta.get('comparator_override')!=a.comparator or meta.get('matrix_backend_override')!=a.matrix_backend:
+                        raise RuntimeError('Hybrid backend override was not applied')
                     if meta.get('vote_backend')!='DCF_OPTIMIZED' or meta.get('full_knn_measured')!='1':
                         raise RuntimeError('Hybrid must use optimized vote and measured full online flow')
                 if (meta.get('party'),meta.get('train_count'),meta.get('features'))!=(str(party),str(a.n),str(a.features)):raise RuntimeError('Wrong party/scale')
@@ -605,9 +619,9 @@ for pid in matching():
                     timing_kind='composed' if item['scope']=='shared' and phase in ['topk','block_cong'] else 'measured')
                 for party,(_,phases) in enumerate(parsed):
                     r=phases[phase,k]
-                    for metric in ['online_ms','sent_bytes','transport_rounds','exchange_rounds','theoretical_rounds','dcf_evaluate_calls']:
+                    for metric in ['online_ms','sent_bytes','transport_actions','exchange_rounds','theoretical_rounds','dcf_evaluate_calls']:
                         row[f'P{party}_{metric}']=float(r[metric]) if metric=='online_ms' else int(r.get(metric,0))
-                    if row[f'P{party}_transport_rounds']!=2*row[f'P{party}_exchange_rounds']:raise RuntimeError('Round/action mismatch')
+                    if row[f'P{party}_transport_actions']!=2*row[f'P{party}_exchange_rounds']:raise RuntimeError('Round/action mismatch')
                     if not math.isfinite(row[f'P{party}_online_ms']) or row[f'P{party}_online_ms']<0:raise RuntimeError('Invalid time')
                 row['online_ms']=max(row['P0_online_ms'],row['P1_online_ms']);row['sent_bytes']=max(row['P0_sent_bytes'],row['P1_sent_bytes'])
                 rows.append(row)

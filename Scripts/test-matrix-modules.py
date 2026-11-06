@@ -51,7 +51,7 @@ def pair(name, n, k, mode, threshold=10, extra=(), binary=None):
         result = parse(log)
         assert len(result)==1, (name,result)
         row=result[0]; assert row['correctness']=='PASS',row
-        assert int(row['transport_rounds']) == 2*int(row['logical_rounds']),row
+        assert int(row['transport_actions']) == 2*int(row['exchange_rounds']),row
         assert int(row['pcr_comparators'])+int(row['dcf_comparators'])==int(row['total_comparators']),row
         assert float(row['online_ms'])>=0 and int(row['sent_bytes'])>=0,row
         rows.append(row)
@@ -65,8 +65,10 @@ for i,(n,k,mode,t) in enumerate(base):
     rows=pair(f'baseline-{i}',n,k,mode,t)
     for party,row in enumerate(rows):
         before=parse(pathlib.Path(a.before)/f'{i}-P{party}.log')[0]
-        for field in ['total_comparators','structural_depth','sent_bytes','transport_rounds',
-                      'logical_rounds','dcf_evaluate_calls','pcr_comparators','dcf_comparators']:
+        if 'transport_rounds' in before:before['transport_actions']=before['transport_rounds']
+        before.setdefault('exchange_rounds',before.get('logical_rounds'))
+        for field in ['total_comparators','structural_depth','sent_bytes','transport_actions',
+                      'exchange_rounds','dcf_evaluate_calls','pcr_comparators','dcf_comparators']:
             assert row[field]==before[field],(i,party,field,row[field],before[field])
 
 # Standalone matrix terminal and full composition, different backends/fixtures.

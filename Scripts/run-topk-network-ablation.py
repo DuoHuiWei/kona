@@ -57,7 +57,7 @@ REMOTE='/usr/src/Garnet'
 TARGET='topk-network-ablation-bench.x'
 NAMES=['DQ','Merge','FullMat','PCM']
 KS=[3,5,10,20,50]
-METRICS=['online_ms','sent_bytes','transport_rounds','exchange_rounds','theoretical_rounds','dcf_evaluate_calls','comparators','swaps']
+METRICS=['online_ms','sent_bytes','transport_actions','exchange_rounds','theoretical_rounds','dcf_evaluate_calls','comparators','swaps']
 
 def docker(*args,**kw):
     return sp.check_output(['docker','exec','kona-dev',*args],text=True,**kw)
@@ -119,7 +119,7 @@ def summarize(out,texts,repeats,n):
                     if metric=='online_ms':assert abs(float(a[metric])-float(block[metric])-float(tail[metric]))<1e-5
                     else:assert int(a[metric])==int(block[metric])+int(tail[metric])
             assert total['timing_kind']==('measured' if name=='Merge' else 'composed_shared_stages')
-        assert all(int(r['transport_rounds'])==2*int(r['exchange_rounds']) for r in phases.values())
+        assert all(int(r['transport_actions'])==2*int(r['exchange_rounds']) for r in phases.values())
         for r in phases.values():assert math.isfinite(float(r['online_ms'])) and float(r['online_ms'])>=0
     assert [(r['trial'],r['k'],r['structure']) for r in parsed[0][1]]==[(r['trial'],r['k'],r['structure']) for r in parsed[1][1]]
     assert set(parsed[0][0])==set(parsed[1][0])

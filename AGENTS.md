@@ -160,3 +160,9 @@ The following baseline was observed after running `bash Scripts/codex-container-
 - In performance paths, when both outgoing messages are ready and neither depends on the incoming message, use `RealTwoPartyPlayer::exchange_concurrent` to reuse the framed nonblocking Exchanger. Keep dependent response steps in their original order.
 - Preserve payload, chunk size, algorithms and comparison/swap policy. The new API counts two directional actions and one logical exchange; overlapping communication time is recorded once. Do not double sent bytes or infer a rate-limit error from one party's bytes divided by a serialized two-direction phase duration.
 - Retain explicitly named native historical controls; the current KONA performance baseline remains explicit `--kona-backend batched-dcf`. Freeze networking/exchanger/octetStream source identities during experiments.
+
+## Parameter and round accounting (2026-11-06)
+
+- Maintained shared defaults live in `Machines/kona-bench-config.hpp`; C++ components and the Python organizer must read them instead of duplicating threshold/chunk literals.
+- Exactly two round meanings: `theoretical_rounds` counts dependency stages without chunk expansion; `exchange_rounds` counts actual communication exchanges. `transport_actions` is a raw send/receive action count used only for checks, never a third round metric.
+- Resolve backend overrides in common argument parsing, verify effective configuration in logs, and reject unsupported combinations instead of silently ignoring them. Preserve protocol graphs, swaps, tie behavior, and current thresholds.

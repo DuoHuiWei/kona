@@ -1,6 +1,7 @@
 #ifndef MACHINES_KONA_SHARE_CONVERSION_HPP_
 #define MACHINES_KONA_SHARE_CONVERSION_HPP_
 
+#include "kona-bench-config.hpp"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -16,7 +17,7 @@ namespace KonaShareConversion
 template<int K>
 using RingShare = Z2<K>;
 
-static const size_t KONA_DEFAULT_BATCH_CHUNK = 16384;
+static const size_t KONA_DEFAULT_BATCH_CHUNK = KonaBenchConfig::MUL_CHUNK;
 
 template<int K>
 std::vector<RingShare<K>> open_additive_batch_l2(
