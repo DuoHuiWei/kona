@@ -1,3 +1,4 @@
+#include "../../Machines/kona-bench-affinity.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
@@ -246,6 +247,7 @@ void print_vector(
 int main(int argc, const char** argv)
 {
     parse_argv(argc, argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
 
     if (playerno != 0 && playerno != 1)
         throw runtime_error("player must be 0 or 1");

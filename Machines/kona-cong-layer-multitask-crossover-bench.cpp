@@ -1,3 +1,4 @@
+#include "kona-bench-affinity.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -387,6 +388,7 @@ BenchResult run_layer_bench(
 int main(int argc, const char** argv)
 {
     parse_argv(argc, argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
     RealTwoPartyPlayer* player = start_networking();
 
     try

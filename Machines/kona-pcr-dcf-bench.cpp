@@ -51,6 +51,8 @@ int get_int_option(ez::ezOptionParser& opt, const char* name)
     return value;
 }
 
+bool diagnostic_final_barrier = false;
+
 void parse_options(
         int argc,
         const char** argv,
@@ -76,6 +78,8 @@ void parse_options(
             "-l", "--large-n");
     opt.add("3", 0, 1, 0, "Large benchmark repeats",
             "-r", "--repeats");
+    opt.add("0", 0, 1, 0, "Add benchmark-only final ACK barrier",
+            "", "--final-barrier");
 
     opt.parse(argc, argv);
     if (opt.isSet("-p"))
@@ -88,6 +92,8 @@ void parse_options(
     small_n = get_int_option(opt, "--small-n");
     large_n = get_int_option(opt, "--large-n");
     repeats = get_int_option(opt, "--repeats");
+    int final_barrier = get_int_option(opt, "--final-barrier");
+    diagnostic_final_barrier = final_barrier != 0;
     if (small_n <= 0 || large_n <= 0 || repeats <= 0)
         throw runtime_error("n and repeats must be positive");
 }
@@ -171,6 +177,7 @@ vector<uint64_t> open_additive_u64(
 }
 
 void print_bench_line(
+        int party,
         const string& name,
         int n,
         int repeats,
@@ -184,6 +191,7 @@ void print_bench_line(
                 chrono::duration<double>::zero())
 {
     cout << name
+         << " party=" << party
          << " n=" << n
          << " repeats=" << repeats
          << " online_ms=" << elapsed.count() * 1000.0
@@ -196,6 +204,15 @@ void print_bench_line(
          << " dcf_eval_total_ms=" << eval_time.count() * 1000.0
          << " dcf_key_init_ms=" << dcf_key_init_time.count() * 1000.0
          << endl;
+}
+
+void run_diagnostic_final_barrier(RealTwoPartyPlayer* player)
+{
+    // This is intentionally outside the formal protocol and is disabled by default.
+    octetStream token, peer;
+    token.store_int(static_cast<size_t>(0), 1);
+    player->send(token);
+    player->receive(peer);
 }
 
 size_t total_rounds(const NamedCommStats& stats)
@@ -286,14 +303,17 @@ int main(int argc, const char** argv)
         {
             vector<Z2<K>> res(2 * large_n);
             KonaPcrCompare::pcr_compare_in_vec_l2(
-                    shares, compare_idx, res, true, player);
+                    shares, compare_idx, res, true, player,
+                    static_cast<size_t>(large_n));
         }
+        if (diagnostic_final_barrier)
+            run_diagnostic_final_barrier(player);
         auto pcr_end = chrono::steady_clock::now();
         auto pcr_comm_after = player->total_comm();
         size_t pcr_sent_after = pcr_comm_after.sent;
-        if (playerno == 0)
         {
             print_bench_line(
+                    playerno,
                     "PCR_COMPARE_IN_VEC_WITH_B2A",
                     large_n,
                     repeats,
@@ -318,16 +338,20 @@ int main(int argc, const char** argv)
         for (int r = 0; r < repeats; r++)
         {
             vector<Z2<K>> res(2 * large_n);
-            timed_dcf_compare.compare_in_vec(shares, compare_idx, res, true);
+            timed_dcf_compare.compare_in_vec(
+                    shares, compare_idx, res, true,
+                    static_cast<size_t>(large_n));
         }
+        if (diagnostic_final_barrier)
+            run_diagnostic_final_barrier(player);
         auto dcf_end = chrono::steady_clock::now();
         auto dcf_comm_after = player->total_comm();
         size_t dcf_sent_after = dcf_comm_after.sent;
         auto dcf_stats_after = timed_dcf_compare.get_stats();
 
-        if (playerno == 0)
         {
             print_bench_line(
+                    playerno,
                     "DCF_COMPARE_IN_VEC",
                     large_n,
                     repeats,

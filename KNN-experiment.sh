@@ -18,8 +18,8 @@ echo "Compilation complete!"
 
 # Step 2: Execute compiled files
 echo "Starting to execute compiled files..."
-nohup ./secknn.x 0 -pn 10000 -h localhost > ./KNN-experiment-res/outputP0_secknn.log 2>&1 &
-nohup ./secknn.x 1 -pn 10000 -h localhost > ./KNN-experiment-res/outputP1_secknn.log 2>&1 &
+nohup taskset -c 0 ./secknn.x 0 -pn 10000 -h localhost > ./KNN-experiment-res/outputP0_secknn.log 2>&1 &
+nohup taskset -c 2 ./secknn.x 1 -pn 10000 -h localhost > ./KNN-experiment-res/outputP1_secknn.log 2>&1 &
 
 # Wait for all background tasks to complete
 wait
@@ -39,8 +39,8 @@ echo "Compilation complete!"
 
 # Step 2: Execute compiled files
 echo "Starting to execute compiled files..."
-nohup ./kona.x 0 -pn 10000 -h localhost > ./KNN-experiment-res/outputP0_kona.log 2>&1 &
-nohup ./kona.x 1 -pn 10000 -h localhost > ./KNN-experiment-res/outputP1_kona.log 2>&1 &
+nohup taskset -c 0 ./kona.x 0 -pn 10000 -h localhost > ./KNN-experiment-res/outputP0_kona.log 2>&1 &
+nohup taskset -c 2 ./kona.x 1 -pn 10000 -h localhost > ./KNN-experiment-res/outputP1_kona.log 2>&1 &
 
 # Wait for all background tasks to complete
 wait
@@ -63,8 +63,8 @@ echo "Compilation complete!"
 
 # Step 2: Execute compiled files
 echo "Starting to execute compiled files..."
-nohup ./optimized-esd.x 0 -pn 10000 -h localhost > ./KNN-experiment-res/outputP0_optimized-esd.log 2>&1 &
-nohup ./optimized-esd.x 1 -pn 10000 -h localhost > ./KNN-experiment-res/outputP1_optimized-esd.log 2>&1 &
+nohup taskset -c 0 ./optimized-esd.x 0 -pn 10000 -h localhost > ./KNN-experiment-res/outputP0_optimized-esd.log 2>&1 &
+nohup taskset -c 2 ./optimized-esd.x 1 -pn 10000 -h localhost > ./KNN-experiment-res/outputP1_optimized-esd.log 2>&1 &
 
 # Wait for all background tasks to complete
 wait
@@ -86,8 +86,8 @@ echo "Compilation complete!"
 
 # Step 2: Execute compiled files
 echo "Starting to execute compiled files..."
-nohup ./optimized-top1.x 0 -pn 10000 -h localhost > ./KNN-experiment-res/outputP0_optimized-top1.log 2>&1 &
-nohup ./optimized-top1.x 1 -pn 10000 -h localhost > ./KNN-experiment-res/outputP1_optimized-top1.log 2>&1 &
+nohup taskset -c 0 ./optimized-top1.x 0 -pn 10000 -h localhost > ./KNN-experiment-res/outputP0_optimized-top1.log 2>&1 &
+nohup taskset -c 2 ./optimized-top1.x 1 -pn 10000 -h localhost > ./KNN-experiment-res/outputP1_optimized-top1.log 2>&1 &
 
 # Wait for all background tasks to complete
 wait

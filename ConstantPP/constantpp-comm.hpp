@@ -33,8 +33,8 @@ inline void unpack_ring_vector(
 /*
  * Symmetric one-stage exchange used by SecED.
  *
- * Kona's existing DCF comparator already follows the same
- * send-then-receive pattern on RealTwoPartyPlayer.
+ * Outgoing values do not depend on incoming values. Exchange both directions
+ * concurrently, including payloads larger than socket buffers.
  */
 inline void exchange_ring_vector(
         RealTwoPartyPlayer* player,
@@ -54,9 +54,7 @@ inline void exchange_ring_vector(
         stats->payload_bytes_sent += send_os.get_length();
         ++stats->send_calls;
     }
-    player->send(send_os);
-
-    player->receive(receive_os);
+    player->exchange_concurrent(send_os, receive_os);
     if (stats)
         ++stats->receive_calls;
 

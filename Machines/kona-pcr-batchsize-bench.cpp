@@ -1,3 +1,4 @@
+#include "kona-bench-affinity.hpp"
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -20,7 +21,7 @@ const int K = 64;
 const int REPEATS = 3;
 int playerno = 0;
 ez::ezOptionParser opt;
-int total_compare = 16348;
+int total_compare = 16384;
 int only_batch_size = 0;
 
 uint64_t mix64(uint64_t x)
@@ -49,7 +50,7 @@ void parse_argv(int argc, const char** argv)
     opt.add("", 0, 1, 0, "Port to listen on", "-mp", "--my-port");
     opt.add("localhost", 0, 1, 0, "Startup host", "-h", "--hostname");
     opt.add("", 0, 1, 0, "Party hostname file", "-ip", "--ip-file-name");
-    opt.add("16348", 0, 1, 0, "Total number of comparisons",
+    opt.add("16384", 0, 1, 0, "Total number of comparisons",
             "-n", "--num-compare");
     opt.add("0", 0, 1, 0, "Run only this batch size (0 means run all defaults)",
             "-b", "--batch-size");
@@ -266,6 +267,7 @@ void print_average(int batch_size, const vector<RepeatResult>& results)
 int main(int argc, const char** argv)
 {
     parse_argv(argc, argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
     RealTwoPartyPlayer* player = start_networking();
 
     try
@@ -276,7 +278,7 @@ int main(int argc, const char** argv)
 
         std::vector<int> batch_sizes = only_batch_size > 0 ?
                 std::vector<int>{only_batch_size} :
-                std::vector<int>{1024, 4096, 8193, 16348, 32696};
+                std::vector<int>{1024, 4096, 8193, 16384, 32768};
         for (int batch_size : batch_sizes)
         {
             if (batch_size > total_compare)

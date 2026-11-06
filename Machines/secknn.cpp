@@ -17,7 +17,11 @@
 using namespace std;
 void test_Z2();
 const int K=64;//环大小
-const int k_const=5;//knn里面的k值 
+#ifdef SECKNN_STAGE_BENCH
+int k_const=5; // Separate benchmark only; original entry remains fixed at 5.
+#else
+const int k_const=5;//knn里面的k值
+#endif
 
 string dataset_name;
 string dir;
@@ -857,8 +861,12 @@ void KNN_party_base::compare_in_vec(vector<Z2<K>>&shares,const vector<int>compar
 
     octetStream send_os,receive_os;
     for(int i=0;i<size_res;i++)compare_res_t[i].pack(send_os);
+    #ifdef SECKNN_STAGE_BENCH
+    player->exchange_concurrent(send_os, receive_os);
+    #else
     player->send(send_os);
     player->receive(receive_os);
+    #endif
     for(int i=0;i<size_res;i++)
     {
         SignedZ2<K>ttmp;
@@ -934,8 +942,12 @@ void KNN_party_base::compare_in_vec(vector<array<Z2<K>,2>>&shares,const vector<i
 
     octetStream send_os,receive_os;
     for(int i=0;i<size_res;i++)compare_res_t[i].pack(send_os);
+    #ifdef SECKNN_STAGE_BENCH
+    player->exchange_concurrent(send_os, receive_os);
+    #else
     player->send(send_os);
     player->receive(receive_os);
+    #endif
     for(int i=0;i<size_res;i++)
     {
         SignedZ2<K>ttmp;
@@ -1099,8 +1111,12 @@ void KNN_party_base::mul_additive(Z2<K>x1,Z2<K>x2,Z2<K>&res)
     octetStream send_os,receive_os;
     (x1-a).pack(send_os);
     (x2-b).pack(send_os);
+    #ifdef SECKNN_STAGE_BENCH
+    player->exchange_concurrent(send_os, receive_os);
+    #else
     player->send(send_os);
     player->receive(receive_os);
+    #endif
     Z2<K>tmp_e,tmp_f;
     tmp_e.unpack(receive_os);
     tmp_f.unpack(receive_os);
@@ -1131,8 +1147,12 @@ void KNN_party_base::mul_vector_additive( vector<Z2<K>>v1 , vector<Z2<K>>v2 , ve
             (v1[i+half_size]-a).pack(send_os);
             (v2[i]-b).pack(send_os);
         }
+        #ifdef SECKNN_STAGE_BENCH
+        player->exchange_concurrent(send_os, receive_os);
+        #else
         player->send(send_os);
         player->receive(receive_os);
+        #endif
         vector<Z2<K>>tmp(v1.size()*2);
         for(int i=0;i<half_size;i++)
         {
@@ -1179,8 +1199,12 @@ void KNN_party_base::mul_vector_additive( vector<Z2<K>>v1 , vector<Z2<K>>v2 , ve
             (v1[i]-a).pack(send_os);
             (v2[i]-b).pack(send_os);
         }
+        #ifdef SECKNN_STAGE_BENCH
+        player->exchange_concurrent(send_os, receive_os);
+        #else
         player->send(send_os);
         player->receive(receive_os);
+        #endif
         vector<Z2<K>>tmp(v1.size()*2);
         for(int i=0;i<(int)v1.size();i++)
         {
@@ -1218,8 +1242,12 @@ Z2<K> KNN_party_base::secure_compare(Z2<K>x1,Z2<K>x2,bool greater_than)//x1>x2--
     
     octetStream send_os,receive_os;
     revealed.pack(send_os);
+    #ifdef SECKNN_STAGE_BENCH
+    player->exchange_concurrent(send_os, receive_os);
+    #else
     player->send(send_os);
     player->receive(receive_os);
+    #endif
     SignedZ2<K>ttmp;
     ttmp.unpack(receive_os);
     revealed+=ttmp;
@@ -1266,9 +1294,14 @@ void KNN_party_SecKNN::compute_ESD_for_one_query(int idx_of_test)
             Z[i][j].pack(send_os);
         }
     }
+#ifdef SECKNN_STAGE_BENCH
+    // Online payload is unchanged; drain both directions concurrently without
+    // blocking two large sends. Standalone original entry keeps its old path.
+    m_player->exchange_concurrent(send_os, receive_os);
+#else
     m_player->send(send_os);
-
     m_player->receive(receive_os);
+#endif
     for(int i=0;i<num_train_data;i++)
     {
         for(int j=0;j<num_features;j++)

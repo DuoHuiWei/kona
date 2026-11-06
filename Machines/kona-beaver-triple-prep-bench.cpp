@@ -1,3 +1,4 @@
+#include "kona-bench-affinity.hpp"
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -154,6 +155,7 @@ public:
 int main(int argc, const char** argv)
 {
     parse_argv(argc, argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
     BeaverTriplePrepBench bench(playerno);
     bench.read_meta();
 

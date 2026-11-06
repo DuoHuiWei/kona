@@ -2,6 +2,7 @@
 #define MACHINES_KONA_CONG_KONA_ADAPTER_HPP_
 
 #include <array>
+#include <cstddef>
 #include <vector>
 
 #include "Math/Z2k.hpp"
@@ -24,7 +25,8 @@ inline void ss_vec_kona_l2(
         std::vector<SharePair<K>>& shares,
         const std::vector<int>& compare_idx_vec,
         const std::vector<Z2<K>>& compare_res,
-        RealTwoPartyPlayer* player)
+        RealTwoPartyPlayer* player,
+        size_t chunk_size = KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK)
 {
     assert(compare_idx_vec.size() && compare_idx_vec.size() == compare_res.size());
     const int size_of_cur_cmp = (int)compare_idx_vec.size();
@@ -38,7 +40,7 @@ inline void ss_vec_kona_l2(
 
     std::vector<Z2<K>> tmp_res(size_of_cur_cmp * 2);
     KonaShareConversion::mul_vector_additive_kona_l2_chunked<K>(
-            tmp_ss, compare_res, tmp_res, true, player);
+            tmp_ss, compare_res, tmp_res, true, player, chunk_size);
 
     for (int i = 0; i < size_of_cur_cmp / 2; i++)
     {

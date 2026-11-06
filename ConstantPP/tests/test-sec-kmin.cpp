@@ -1,3 +1,4 @@
+#include "../../Machines/kona-bench-affinity.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -219,6 +220,7 @@ void print_u64_vector(
 int main(int argc, const char** argv)
 {
     parse_argv(argc, argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
     RealTwoPartyPlayer* player = start_networking();
 
     /*

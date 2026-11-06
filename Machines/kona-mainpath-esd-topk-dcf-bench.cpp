@@ -1,7 +1,13 @@
 #include <array>
+#include <algorithm>
+#include <sstream>
+#include <cstdlib>
 #include <chrono>
+#include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -25,6 +31,8 @@ string dataset_name = "arcene";
 string data_dir = "knn-1/";
 int topk_k = 5;
 int query_limit = -1;
+int trial_count = 3;
+string network_profile = "UNVERIFIED";
 long long call_evaluate_time = 0;
 chrono::duration<double> total_duration(0);
 
@@ -51,15 +59,6 @@ size_t total_rounds(const NamedCommStats& stats)
         rounds += it->second.rounds;
     return rounds;
 }
-
-double total_comm_seconds(NamedCommStats stats)
-{
-    double total = 0;
-    for (auto it = stats.begin(); it != stats.end(); ++it)
-        total += it->second.timer.elapsed();
-    return total;
-}
-
 
 bigint evaluate_original_dcf(Z2<K> x, int n, int playerID)
 {
@@ -138,6 +137,9 @@ void parse_argv(int argc, const char** argv)
     opt.add("5", 0, 1, 0, "Top-k", "-k", "--topk");
     opt.add("-1", 0, 1, 0, "Limit number of test queries; -1 means all",
             "-q", "--query-limit");
+    opt.add("3", 0, 1, 0, "Number of Top-k trials", "-t", "--trials");
+    opt.add("UNVERIFIED", 0, 1, 0, "Network profile label",
+            "--network-profile");
     opt.parse(argc, argv);
 
     if (opt.isSet("-p"))
@@ -151,8 +153,10 @@ void parse_argv(int argc, const char** argv)
     opt.get("--data-dir")->getString(data_dir);
     topk_k = get_int_option(opt, "--topk");
     query_limit = get_int_option(opt, "--query-limit");
-    if (topk_k <= 0)
-        throw runtime_error("top-k must be positive");
+    trial_count = get_int_option(opt, "--trials");
+    opt.get("--network-profile")->getString(network_profile);
+    if (topk_k <= 0 || trial_count <= 0)
+        throw runtime_error("top-k and trials must be positive");
 }
 
 RealTwoPartyPlayer* start_networking()
@@ -201,8 +205,27 @@ public:
     vector<Z2<K>> test_triples_0;
     vector<Z2<K>> test_triples_1;
     vector<EsdEntry> esd_vec;
+    KonaDcfCompare::Compare64<K> dcf_compare;
+    uint64_t topk_comparators = 0;
+    uint64_t topk_depth = 0;
+    uint64_t dcf_chunks = 0;
+    uint64_t swap_chunks = 0;
+    struct Layer { vector<int> indices; vector<Z2<K>> result; };
+    vector<Layer> plan;
+    double compare_ms = 0, swap_ms = 0;
+    size_t compare_bytes = 0, swap_bytes = 0;
+    size_t compare_actions = 0, swap_actions = 0;
 
-    explicit KonaMainpathEsdTopkDcfBench(RealTwoPartyPlayer* p) : player(p) {}
+    // Public scheduling and outer work buffers are prepared outside online timing.
+    // The index/leftover rule below is exactly the former top_1_dcf rule.
+    void prepare_topk_plan()
+    {
+        for (int i = 0; i < topk_k; ++i)
+            prepare_top_1(num_train_data - i);
+    }
+
+    explicit KonaMainpathEsdTopkDcfBench(RealTwoPartyPlayer* p) :
+            player(p), dcf_compare(p, playerno) {}
 
     ~KonaMainpathEsdTopkDcfBench()
     {
@@ -452,9 +475,7 @@ public:
         }
     }
 
-    void top_1_dcf(
-            int size_now,
-            bool min_in_last)
+    void prepare_top_1(int size_now)
     {
         vector<int> compare_idx_vec;
         for (int i = 0; i < size_now; i++)
@@ -478,10 +499,7 @@ public:
             }
 
             vector<Z2<K>> compare_res(compare_idx_vec.size());
-            compare_in_vec_original_dcf(
-                    compare_idx_vec, compare_res, !min_in_last);
-            KonaCongKonaAdapter::ss_vec_kona_l2<K>(
-                    esd_vec, compare_idx_vec, compare_res, player);
+            plan.push_back({compare_idx_vec, std::move(compare_res)});
 
             vector<int> next;
             for (size_t i = 1; i < compare_idx_vec.size(); i += 2)
@@ -490,14 +508,66 @@ public:
         }
     }
 
-    uint64_t topk_label_checksum() const
+    void execute_topk()
     {
-        uint64_t checksum = 0;
-        for (int i = 0; i < topk_k; i++)
-            checksum += esd_vec[esd_vec.size() - 1 - i][1].get_limb(0);
-        return checksum;
+        using Clock = chrono::steady_clock;
+        const size_t chunk = KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK;
+        for (auto& layer : plan)
+        {
+            const size_t n = layer.indices.size();
+            topk_comparators += n / 2;
+            ++topk_depth;
+            dcf_chunks += (n / 2 + chunk - 1) / chunk;
+            swap_chunks += (n + chunk - 1) / chunk;
+            auto before = player->total_comm();
+            auto start = Clock::now();
+            dcf_compare.compare_in_vec(esd_vec, layer.indices, layer.result, false);
+            auto end = Clock::now();
+            auto delta = player->total_comm() - before;
+            compare_ms += chrono::duration<double, milli>(end - start).count();
+            compare_bytes += delta.sent;
+            compare_actions += total_rounds(delta);
+            before = player->total_comm();
+            start = Clock::now();
+            KonaCongKonaAdapter::ss_vec_kona_l2<K>(
+                    esd_vec, layer.indices, layer.result, player);
+            end = Clock::now();
+            delta = player->total_comm() - before;
+            swap_ms += chrono::duration<double, milli>(end - start).count();
+            swap_bytes += delta.sent;
+            swap_actions += total_rounds(delta);
+        }
+    }
+
+    void reset_topk_stats()
+    {
+        compare_ms = swap_ms = 0;
+        compare_bytes = swap_bytes = compare_actions = swap_actions = 0;
+        topk_comparators = 0;
+        topk_depth = 0;
+        dcf_chunks = 0;
+        swap_chunks = 0;
+        dcf_compare.reset_stats();
     }
 };
+
+void benchmark_barrier(RealTwoPartyPlayer* player)
+{
+    octetStream os;
+    Z2<K>(0).pack(os);
+    if (playerno == 0)
+    {
+        player->send(os);
+        os.clear();
+        player->receive(os);
+    }
+    else
+    {
+        octetStream received;
+        player->receive(received);
+        player->send(os);
+    }
+}
 
 } // namespace
 
@@ -512,85 +582,175 @@ int main(int argc, const char** argv)
     {
         KonaMainpathEsdTopkDcfBench bench(player);
 
-        auto read_start = Clock::now();
+        const auto setup_start = Clock::now();
         bench.read_meta_and_P0_sample_P1_query();
-        auto read_end = Clock::now();
+        const auto read_end = Clock::now();
 
         if (topk_k > bench.num_train_data)
             throw runtime_error("top-k larger than train size");
 
-        auto triple_start = Clock::now();
+        const auto material_start = Clock::now();
         bench.fake_load_triples();
-        auto triple_end = Clock::now();
-
-        auto share_start = Clock::now();
+        const auto material_end = Clock::now();
         bench.aby2_share_data_and_additive_share_label_list();
-        auto share_end = Clock::now();
+        const auto sharing_end = Clock::now();
+        bench.compute_ESD_for_one_query(0); // explicitly outside Top-k timer
+        const auto distance_end = Clock::now();
+        const auto distance_and_labels_ready = bench.esd_vec;
+        bench.prepare_topk_plan();
+        const auto plan_end = Clock::now();
+        auto elapsed_ms = [](Clock::time_point a, Clock::time_point b) {
+            return chrono::duration<double, milli>(b - a).count();
+        };
+        cout << fixed << setprecision(6)
+             << "record_type=setup\nparty=" << playerno << "\ndataset=" << dataset_name
+             << "\nsetup_in_topk_scope=0\n"
+             << "read_ms=" << elapsed_ms(setup_start, read_end) << '\n'
+             << "material_ms=" << elapsed_ms(material_start, material_end) << '\n'
+             << "input_sharing_ms=" << elapsed_ms(material_end, sharing_end) << '\n'
+             << "distance_ms=" << elapsed_ms(sharing_end, distance_end) << '\n'
+             << "public_plan_and_fixture_copy_ms=" << elapsed_ms(distance_end, plan_end) << "\n\n";
 
-        int queries = bench.num_test_data;
-        if (query_limit >= 0)
-            queries = min(queries, query_limit);
-        if (queries <= 0)
-            throw runtime_error("no query to benchmark");
-
-        auto comm_before = player->total_comm();
-        auto online_start = Clock::now();
-
-        double esd_seconds = 0;
-        double topk_seconds = 0;
-        uint64_t label_checksum = 0;
-        for (int q = 0; q < queries; q++)
+        vector<double> trial_ms;
+        vector<double> trial_bytes;
+        vector<double> trial_rtt;
+        vector<double> trial_logical;
+        for (int trial = 1; trial <= trial_count; trial++)
         {
-            auto esd_start = Clock::now();
-            bench.compute_ESD_for_one_query(q);
-            auto esd_end = Clock::now();
-            esd_seconds += chrono::duration<double>(esd_end - esd_start).count();
+            bench.esd_vec = distance_and_labels_ready;
+            bench.reset_topk_stats();
+            benchmark_barrier(player); // outside timer and comm delta
+            const auto comm_before = player->total_comm();
+            const auto topk_start = Clock::now();
+            bench.execute_topk();
+            const auto topk_end = Clock::now();
+            const auto delta = player->total_comm() - comm_before;
+            const uint64_t actions = total_rounds(delta);
+            const uint64_t rtt = actions / 2;
+            const uint64_t expected_rtt = bench.dcf_chunks + bench.swap_chunks;
+            const uint64_t logical = 2 * bench.topk_depth;
+            if (actions % 2 || rtt != expected_rtt ||
+                    bench.compare_actions != 2 * bench.dcf_chunks ||
+                    bench.swap_actions != 2 * bench.swap_chunks ||
+                    bench.compare_bytes + bench.swap_bytes != delta.sent)
+                throw runtime_error("Top-k RTT/action accounting mismatch: actions=" +
+                        to_string(actions) + " rtt=" + to_string(rtt) +
+                        " dcf_chunks=" + to_string(bench.dcf_chunks) +
+                        " swap_chunks=" + to_string(bench.swap_chunks));
 
-            auto topk_start = Clock::now();
-            for (int i = 0; i < topk_k; i++)
-                bench.top_1_dcf(bench.num_train_data - i, true);
-            label_checksum += bench.topk_label_checksum();
-            auto topk_end = Clock::now();
-            topk_seconds += chrono::duration<double>(topk_end - topk_start).count();
+            {
+                const double ms = chrono::duration<double, milli>(
+                        topk_end - topk_start).count();
+                // Exchange accounting only AFTER online time/byte snapshots.
+                // These messages and the pre-trial barrier never enter Top-k metrics.
+                ostringstream encoded;
+                encoded << setprecision(17) << ms << ' ' << delta.sent << ' '
+                        << actions << ' ' << rtt;
+                octetStream send_stats, receive_stats;
+                send_stats.store(encoded.str());
+                if (playerno == 0) { player->send(send_stats); player->receive(receive_stats); }
+                else { player->receive(receive_stats); player->send(send_stats); }
+                string peer_string;
+                receive_stats.get(peer_string);
+                istringstream peer_stream(peer_string);
+                double peer_ms;
+                size_t peer_bytes, peer_actions, peer_rtt;
+                if (!(peer_stream >> peer_ms >> peer_bytes >> peer_actions >> peer_rtt))
+                    throw runtime_error("invalid peer accounting");
+                const double max_ms = max(ms, peer_ms);
+                const size_t max_bytes = max(size_t(delta.sent), peer_bytes);
+                trial_ms.push_back(max_ms);
+                trial_bytes.push_back(max_bytes);
+                trial_rtt.push_back(rtt);
+                trial_logical.push_back(logical);
+                cout << fixed << setprecision(6)
+                     << "record_type=trial\nmetrics_version=kona-topk-v2\n"
+                     << "backend=kona-repeated-top1+batch-dcf\nmaterial_mode=L2-zero-auxiliary\n"
+                     << "test_status=COMPLETED\naccounting_check=PASS\n"
+                     << "dataset=" << dataset_name << '\n'
+                     << "party=" << playerno << '\n'
+                     << "N=" << bench.num_train_data << '\n'
+                     << "features=" << bench.num_features << '\n'
+                     << "query_count=1\n"
+                     << "k=" << topk_k << '\n'
+                     << "trial=" << trial << '\n'
+                     << "comparators=" << bench.topk_comparators << '\n'
+                     << "depth=" << bench.topk_depth << '\n'
+                     << "dcf_chunks=" << bench.dcf_chunks << '\n'
+                     << "swap_chunks=" << bench.swap_chunks << '\n'
+                     << "dataset_path=" << bench.dataset_path() << '\n'
+                     << "chunk_limit=" << KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK << '\n'
+                     << "output_scope=selected_k_distance_label_shares\n"
+                     << "distance_in_scope=0\nvote_in_scope=0\nwarmup_trials=0\n"
+                     << "compare_ms=" << bench.compare_ms << '\n'
+                     << "swap_ms=" << bench.swap_ms << '\n'
+                     << "online_other_ms=" << ms - bench.compare_ms - bench.swap_ms << '\n'
+                     << "compare_sent_bytes=" << bench.compare_bytes << '\n'
+                     << "swap_sent_bytes=" << bench.swap_bytes << '\n'
+                     << "compare_transport_rounds=" << bench.compare_actions << '\n'
+                     << "swap_transport_rounds=" << bench.swap_actions << '\n'
+                     << "compare_exchange_rounds=" << bench.compare_actions / 2 << '\n'
+                     << "swap_exchange_rounds=" << bench.swap_actions / 2 << '\n'
+                     << "call_evaluate_nums=" << bench.dcf_compare.get_stats().evaluate_calls << '\n'
+                     << "dcf_evaluate_ms=" << bench.dcf_compare.get_stats().evaluate_time.count() * 1000 << '\n'
+                     << "topk_e2e_ms=" << ms << '\n'
+                     << "P0_topk_ms=" << (playerno == 0 ? ms : peer_ms) << '\n'
+                     << "P1_topk_ms=" << (playerno == 1 ? ms : peer_ms) << '\n'
+                     << "P0_sent_bytes=" << (playerno == 0 ? size_t(delta.sent) : peer_bytes) << '\n'
+                     << "P1_sent_bytes=" << (playerno == 1 ? size_t(delta.sent) : peer_bytes) << '\n'
+                     << "topk_ms_per_compare=" << (bench.topk_comparators ? ms / bench.topk_comparators : 0) << '\n'
+                     << "trial_max_ms=" << max_ms << '\n'
+                     << "trial_max_sent_bytes=" << max_bytes << '\n'
+                     << "P0_transport_rounds=" << (playerno == 0 ? actions : peer_actions) << '\n'
+                     << "P1_transport_rounds=" << (playerno == 1 ? actions : peer_actions) << '\n'
+                     << "P0_exchange_rounds=" << (playerno == 0 ? rtt : peer_rtt) << '\n'
+                     << "P1_exchange_rounds=" << (playerno == 1 ? rtt : peer_rtt) << '\n'
+                     << "topk_ms=" << ms << '\n'
+                     << "topk_sent_bytes=" << delta.sent << '\n'
+                     << "topk_rtt_rounds=" << rtt << '\n'
+                     << "transport_rounds=" << actions << '\n'
+                     << "exchange_rounds=" << rtt << '\n'
+                     << "structural_depth=" << bench.topk_depth << '\n'
+                     << "theoretical_rounds=" << logical << '\n'
+                     << "topk_logical_rounds_definition=theoretical_unchunked\n"
+                     << "topk_logical_rounds=" << logical << '\n'
+                     << "timer_scope=distance_label_shares_and_materials_ready_to_selected_k_shares_ready\n"
+                     << "network_env=" << network_profile << '\n'
+                     << "correctness=NOT_CHECKED\n\n";
+            }
         }
 
-        auto online_end = Clock::now();
-        auto comm_after = player->total_comm();
-        auto delta = comm_after - comm_before;
-
-        chrono::duration<double> read_time = read_end - read_start;
-        chrono::duration<double> triple_time = triple_end - triple_start;
-        chrono::duration<double> share_time = share_end - share_start;
-        chrono::duration<double> online_time = online_end - online_start;
-
-        if (playerno == 0)
         {
-            cout << "KONA_MAINPATH_ESD_TOPK_DCF"
-                 << " dataset=" << dataset_name
-                 << " n=" << bench.num_train_data
-                 << " features=" << bench.num_features
-                 << " queries=" << queries
-                 << " k=" << topk_k
-                 << " timer_scope=mainpath_after_share_setup_to_topk_labels"
-                 << " read_ms=" << read_time.count() * 1000.0
-                 << " fake_triple_setup_ms=" << triple_time.count() * 1000.0
-                 << " share_setup_ms=" << share_time.count() * 1000.0
-                 << " dcf_key_init_ms=0"
-                 << " online_esd_ms=" << esd_seconds * 1000.0
-                 << " online_topk_ms=" << topk_seconds * 1000.0
-                 << " online_total_ms=" << online_time.count() * 1000.0
-                 << " comm_ms=" << total_comm_seconds(delta) * 1000.0
-                 << " sent_bytes=" << delta.sent
-                 << " transport_rounds=" << total_rounds(delta)
-                 << " logical_rounds=" << total_rounds(delta) / 2
-                 << " call_evaluate_nums=" << call_evaluate_time
-                 << " dcf_eval_total_ms=" << total_duration.count() * 1000.0
-                 << " topk_label_checksum=" << label_checksum
-                 << endl;
+            const auto mean = [](const vector<double>& values) {
+                return accumulate(values.begin(), values.end(), 0.0) /
+                        values.size();
+            };
+            const double mean_ms = mean(trial_ms);
+            double sum_sq = 0;
+            for (double value : trial_ms)
+                sum_sq += (value - mean_ms) * (value - mean_ms);
+            const double sd = trial_ms.size() > 1
+                    ? sqrt(sum_sq / (trial_ms.size() - 1)) : 0;
+            auto sorted = trial_ms;
+            sort(sorted.begin(), sorted.end());
+            cout << fixed << setprecision(6)
+                 << "record_type=summary\nsummary_time=max_P0_P1_per_trial\nsummary_bytes=max_P0_P1_per_trial\n"
+                 << "topk_median_ms=" << (sorted[(sorted.size()-1)/2] + sorted[sorted.size()/2]) / 2 << '\n'
+                 << "topk_min_ms=" << sorted.front() << '\n'
+                 << "topk_max_ms=" << sorted.back() << '\n'
+                 << "topk_cv=" << (trial_ms.size() > 1 ? to_string(sd / mean_ms) : "NA") << '\n'
+                 << "dataset=" << dataset_name << '\n'
+                 << "trials=" << trial_count << '\n'
+                 << "topk_mean_ms=" << mean_ms << '\n'
+                 << "topk_sample_sd_ms=" << (trial_ms.size() > 1 ? to_string(sd) : "NA") << '\n'
+                 << "topk_mean_sent_bytes=" << mean(trial_bytes) << '\n'
+                 << "topk_mean_rtt_rounds=" << mean(trial_rtt) << '\n'
+                 << "topk_mean_logical_rounds=" << mean(trial_logical) << '\n';
         }
     }
     catch (...)
     {
+        cerr << "test_status=FAILED\ndataset=" << dataset_name << "\nparty=" << playerno << endl;
         delete player;
         throw;
     }

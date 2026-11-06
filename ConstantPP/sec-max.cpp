@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include "sec-bcom-material.hpp"
+#include "secmax-local-fss-l2.hpp"
 
 namespace ConstantPP
 {
@@ -15,7 +16,8 @@ Ring sec_max_kona_dcf(
         const BeaverTripleParty& reused_mul_triple,
         KonaDcfCompare::Compare64<RING_BITS>& dcf_compare,
         ProtocolStats* protocol_stats,
-        SecMaxStats* max_stats)
+        SecMaxStats* max_stats,
+        SecMaxLocalFssL2* performance_l2)
 {
     if (!player)
         throw std::invalid_argument(
@@ -47,20 +49,28 @@ Ring sec_max_kona_dcf(
      * The complement direction gives a deterministic total order on ties,
      * matching the source engineering behavior.
      */
-    const auto plan =
-            make_sec_bcom_upper_triangle_plan(k);
-
     SecBComStats bcom_stats;
-    const auto su_share =
-            sec_bcom_kona_dcf(
-                    player,
-                    playerno,
-                    frequency_share,
-                    CompareOp::Greater,
-                    plan,
-                    dcf_compare,
-                    protocol_stats,
-                    &bcom_stats);
+    std::vector<Ring> su_share;
+    if (max_stats) max_stats->rank_comm_before = player->total_comm();
+    if (performance_l2)
+    {
+        su_share = performance_l2->rank_greater(frequency_share, player, protocol_stats);
+        bcom_stats.unordered_pairs = k * (k - 1) / 2;
+        bcom_stats.dcf_compare_pairs = bcom_stats.unordered_pairs;
+        bcom_stats.kona_dcf_evaluate_calls = performance_l2->get_stats().evaluate_calls;
+        bcom_stats.kona_dcf_evaluate_ms = performance_l2->get_stats().evaluate_time.count() * 1000;
+        if (max_stats) {
+            max_stats->local_fss_calls = bcom_stats.kona_dcf_evaluate_calls;
+            max_stats->local_fss_ms = bcom_stats.kona_dcf_evaluate_ms;
+        }
+    }
+    else
+    {
+        const auto plan = make_sec_bcom_upper_triangle_plan(k);
+        su_share = sec_bcom_kona_dcf(player, playerno, frequency_share,
+                CompareOp::Greater, plan, dcf_compare, protocol_stats, &bcom_stats);
+    }
+    if (max_stats) max_stats->rank_comm_after = player->total_comm();
 
     /*
      * Step 2:

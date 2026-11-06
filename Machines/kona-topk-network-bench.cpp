@@ -1,8 +1,11 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -16,6 +19,7 @@
 #include "kona-matrix-topk.hpp"
 #include "kona-pcr-compare.hpp"
 #include "kona-share-conversion.hpp"
+#include "../ConstantPP/data-loader.hpp"
 
 using namespace std;
 
@@ -26,6 +30,10 @@ const int K = 64;
 int playerno = 0;
 ez::ezOptionParser opt;
 string mode = "legacy";
+string dataset_name;
+int trial_count = 3;
+string network_profile = "native";
+int hybrid_threshold = 160;
 
 template<int KK>
 using SharePair = std::array<Z2<KK>, 2>;
@@ -42,6 +50,17 @@ struct BenchResult
     uint64_t topk_label_checksum = 0;
     uint64_t winner_label_share = 0;
     double dcf_key_init_seconds = 0;
+    size_t comparators = 0;
+    size_t network_depth = 0;
+    size_t b2a_chunks = 0;
+    size_t swap_chunks = 0;
+    size_t transport_actions = 0;
+    size_t mirror_exchanges = 0;
+    size_t pcr_layers = 0;
+    size_t dcf_layers = 0;
+    size_t pcr_comparators = 0;
+    size_t dcf_comparators = 0;
+    size_t dcf_chunks = 0;
 };
 
 uint64_t mix64(uint64_t x)
@@ -75,6 +94,14 @@ void parse_argv(int argc, const char** argv, int& n, int& k)
     opt.add("legacy", 0, 1, 0,
             "Benchmark mode: legacy, kona-dcf, cong, cong-dcf, matrix",
             "-m", "--mode");
+    opt.add("", 0, 1, 0, "Dataset name for real-data Cong/PCR run",
+            "-d", "--dataset");
+    opt.add("3", 0, 1, 0, "Trial count", "-t", "--trials");
+    opt.add("native", 0, 1, 0, "Network profile label: native, lan, wan",
+            "--network-profile");
+    opt.add("160", 0, 1, 0,
+            "Hybrid threshold: DCF at or below, PCR above",
+            "--hybrid-threshold");
     opt.parse(argc, argv);
     if (opt.isSet("-p"))
         opt.get("-p")->getInt(playerno);
@@ -83,11 +110,21 @@ void parse_argv(int argc, const char** argv, int& n, int& k)
     opt.get("--size")->getInt(n);
     opt.get("--topk")->getInt(k);
     opt.get("--mode")->getString(mode);
+    opt.get("--dataset")->getString(dataset_name);
+    opt.get("--trials")->getInt(trial_count);
+    opt.get("--network-profile")->getString(network_profile);
+    opt.get("--hybrid-threshold")->getInt(hybrid_threshold);
     if (mode == "legacy-dcf")
         mode = "kona-dcf";
     if (mode != "legacy" && mode != "kona-dcf" &&
-            mode != "cong" && mode != "cong-dcf" && mode != "matrix")
+            mode != "cong" && mode != "cong-dcf" && mode != "hybrid" &&
+            mode != "matrix")
         throw runtime_error("unknown mode: " + mode);
+    if (trial_count <= 0 || hybrid_threshold < 0)
+        throw runtime_error("invalid trials or hybrid threshold");
+    if (network_profile != "native" && network_profile != "lan" &&
+            network_profile != "wan")
+        throw runtime_error("network profile must be native, lan, or wan");
 }
 
 RealTwoPartyPlayer* start_networking()
@@ -147,6 +184,56 @@ vector<SharePair<K>> build_shares(int n)
         shares[i][1] = additive_share_for(playerno, i + 100000, ring(label));
     }
     return shares;
+}
+
+string real_dataset_path(const string& name)
+{
+    string leaf = name;
+    if (leaf.size() < 5 || leaf.substr(leaf.size() - 5) != "-data")
+        leaf += "-data";
+    return "Player-Data/Knn-Data/knn-1/" + leaf;
+}
+
+vector<SharePair<K>> build_real_distance_label_shares(
+        const string& name, int& n, int& features)
+{
+    const auto dataset = ConstantPP::load_constantpp_dataset(
+            real_dataset_path(name));
+    n = (int)dataset.database.size();
+    features = (int)dataset.num_features;
+    vector<SharePair<K>> shares(n);
+    for (int i = 0; i < n; i++)
+    {
+        Z2<K> distance(0);
+        for (int j = 0; j < features; j++)
+        {
+            const Z2<K> delta = ring(dataset.database[i][j]) -
+                    ring(dataset.query[j]);
+            distance += delta * delta;
+        }
+        shares[i][0] = additive_share_for(playerno, i, distance);
+        shares[i][1] = additive_share_for(
+                playerno, i + 100000, ring(dataset.labels[i]));
+    }
+    return shares;
+}
+
+void benchmark_barrier(RealTwoPartyPlayer* player)
+{
+    octetStream os;
+    ring(0).pack(os);
+    if (playerno == 0)
+    {
+        player->send(os);
+        os.clear();
+        player->receive(os);
+    }
+    else
+    {
+        octetStream received;
+        player->receive(received);
+        player->send(os);
+    }
 }
 
 void legacy_top1_with_pcr(
@@ -393,6 +480,130 @@ BenchResult benchmark_cong_network(
     return res;
 }
 
+BenchResult benchmark_cong_pcr_instrumented(
+        vector<SharePair<K>>& shares,
+        const KonaCongTopK::CongNetwork& network,
+        RealTwoPartyPlayer* player)
+{
+    BenchResult res;
+    res.network_depth = network.levels.size();
+    for (const auto& level : network.levels)
+    {
+        const size_t c = level.size();
+        res.comparators += c;
+        res.b2a_chunks += (c + KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK - 1) /
+                KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK;
+        res.swap_chunks += (2 * c + KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK - 1) /
+                KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK;
+    }
+
+    const auto comm_before = player->total_comm();
+    const auto start = chrono::steady_clock::now();
+    for (const auto& level : network.levels)
+    {
+        const vector<int> indices = KonaCongTopK::flatten_level(level);
+        vector<Z2<K>> compare_res(indices.size());
+        KonaPcrCompare::pcr_compare_in_vec_l2(
+                shares, indices, compare_res, true, player);
+        KonaCongKonaAdapter::ss_vec_kona_l2<K>(
+                shares, indices, compare_res, player);
+    }
+    KonaCongTopK::move_output_wires_to_tail(shares, network.output_wires);
+    const auto end = chrono::steady_clock::now();
+    const auto delta = player->total_comm() - comm_before;
+
+    res.total_seconds = chrono::duration<double>(end - start).count();
+    res.sent_bytes = delta.sent;
+    res.transport_actions = total_rounds(delta);
+    if (res.transport_actions % 2 != 0)
+        throw runtime_error("odd Cong/PCR transport action count");
+    res.mirror_exchanges = res.transport_actions / 2;
+
+    // Per Cong level: seven dependent packed-Boolean PCR exchanges, then
+    // chunked B2A, then chunked aligned distance/label secure swap.
+    const size_t expected_exchanges =
+            7 * res.network_depth + res.b2a_chunks + res.swap_chunks;
+    if (res.mirror_exchanges != expected_exchanges)
+        throw runtime_error("Cong/PCR RTT cross-check failed: actions=" +
+                to_string(res.transport_actions) + " mirror_exchanges=" +
+                to_string(res.mirror_exchanges) + " expected=" +
+                to_string(expected_exchanges));
+    res.logical_rounds = 9 * res.network_depth;
+    return res;
+}
+
+BenchResult benchmark_cong_hybrid_instrumented(
+        vector<SharePair<K>>& shares,
+        const KonaCongTopK::CongNetwork& network,
+        int threshold,
+        KonaDcfCompare::Compare64<K>& dcf_compare,
+        RealTwoPartyPlayer* player)
+{
+    BenchResult res;
+    res.network_depth = network.levels.size();
+    vector<bool> use_dcf;
+    use_dcf.reserve(network.levels.size());
+    for (const auto& level : network.levels)
+    {
+        const size_t c = level.size();
+        const bool dcf = c <= static_cast<size_t>(threshold);
+        use_dcf.push_back(dcf);
+        res.comparators += c;
+        res.swap_chunks += (2 * c + KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK - 1) /
+                KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK;
+        if (dcf)
+        {
+            res.dcf_layers++;
+            res.dcf_comparators += c;
+        res.dcf_chunks += (c + 16384 - 1) / 16384;
+        }
+        else
+        {
+            res.pcr_layers++;
+            res.pcr_comparators += c;
+            res.b2a_chunks += (c + KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK - 1) /
+                    KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK;
+        }
+    }
+
+    dcf_compare.reset_stats();
+    const auto comm_before = player->total_comm();
+    const auto start = chrono::steady_clock::now();
+    for (size_t depth = 0; depth < network.levels.size(); depth++)
+    {
+        const vector<int> indices =
+                KonaCongTopK::flatten_level(network.levels[depth]);
+        vector<Z2<K>> compare_res(indices.size());
+        if (use_dcf[depth])
+            dcf_compare.compare_in_vec(
+                    shares, indices, compare_res, true);
+        else
+            KonaPcrCompare::pcr_compare_in_vec_l2(
+                    shares, indices, compare_res, true, player);
+        KonaCongKonaAdapter::ss_vec_kona_l2<K>(
+                shares, indices, compare_res, player);
+    }
+    KonaCongTopK::move_output_wires_to_tail(shares, network.output_wires);
+    const auto end = chrono::steady_clock::now();
+    const auto delta = player->total_comm() - comm_before;
+
+    res.total_seconds = chrono::duration<double>(end - start).count();
+    res.sent_bytes = delta.sent;
+    res.transport_actions = total_rounds(delta);
+    if (res.transport_actions % 2 != 0)
+        throw runtime_error("odd Cong hybrid transport action count");
+    res.mirror_exchanges = res.transport_actions / 2;
+    const size_t expected_exchanges = 7 * res.pcr_layers +
+            res.b2a_chunks + res.dcf_chunks + res.swap_chunks;
+    if (res.mirror_exchanges != expected_exchanges)
+        throw runtime_error("Cong hybrid RTT cross-check failed: actions=" +
+                to_string(res.transport_actions) + " mirror_exchanges=" +
+                to_string(res.mirror_exchanges) + " expected=" +
+                to_string(expected_exchanges));
+    res.logical_rounds = 9 * res.pcr_layers + 2 * res.dcf_layers;
+    return res;
+}
+
 BenchResult benchmark_cong_network_dcf(
         const vector<SharePair<K>>& input,
         int k,
@@ -482,6 +693,117 @@ int main(int argc, const char** argv)
 
     try
     {
+        if (!dataset_name.empty())
+        {
+            if (mode != "cong" && mode != "hybrid")
+                throw runtime_error("real dataset mode requires --mode cong or hybrid");
+            int features = 0;
+            auto prepared = build_real_distance_label_shares(
+                    dataset_name, n, features);
+            if (k <= 0 || k > n)
+                throw runtime_error("invalid top-k for dataset");
+            const auto network = KonaCongTopK::build_cong_network(n, k);
+            KonaDcfCompare::Compare64<K> dcf_compare(player, playerno);
+
+            vector<double> times, bytes, actions, exchanges, logical;
+            BenchResult shape;
+            for (int trial = 1; trial <= trial_count; trial++)
+            {
+                auto shares = prepared; // input restoration is outside timer
+                benchmark_barrier(player); // outside timer and comm delta
+                const auto result = mode == "hybrid" ?
+                        benchmark_cong_hybrid_instrumented(
+                                shares, network, hybrid_threshold,
+                                dcf_compare, player) :
+                        benchmark_cong_pcr_instrumented(
+                                shares, network, player);
+                shape = result;
+                {
+                    const double ms = result.total_seconds * 1000.0;
+                    if (playerno == 0)
+                    {
+                        times.push_back(ms);
+                        bytes.push_back(result.sent_bytes);
+                        actions.push_back(result.transport_actions);
+                        exchanges.push_back(result.mirror_exchanges);
+                        logical.push_back(result.logical_rounds);
+                    }
+                    cout << fixed << setprecision(6)
+                         << "dataset=" << dataset_name << '\n'
+                         << "party=" << playerno << '\n'
+                         << "N=" << n << '\n'
+                         << "features=" << features << '\n'
+                         << "query_count=1\n"
+                         << "k=" << k << '\n'
+                         << "trial=" << trial << '\n'
+                         << "network=CONG\n"
+                         << "comparator_backend="
+                         << (mode == "hybrid" ? "LAYER_WIDTH_HYBRID" :
+                                 "SIMPLIFIED_PCR_L2") << '\n'
+                         << "network_profile=" << network_profile << '\n'
+                         << "hybrid_threshold=" << hybrid_threshold << '\n'
+                         << "comparators=" << result.comparators << '\n'
+                         << "network_depth=" << result.network_depth << '\n'
+                         << "b2a_chunks=" << result.b2a_chunks << '\n'
+                         << "dcf_chunks=" << result.dcf_chunks << '\n'
+                         << "swap_chunks=" << result.swap_chunks << '\n'
+                         << "chunks=" << result.b2a_chunks + result.dcf_chunks << '\n'
+                         << "pcr_layers=" << result.pcr_layers << '\n'
+                         << "dcf_layers=" << result.dcf_layers << '\n'
+                         << "pcr_comparators=" << result.pcr_comparators << '\n'
+                         << "dcf_comparators=" << result.dcf_comparators << '\n'
+                         << "topk_ms=" << ms << '\n'
+                         << "topk_sent_bytes=" << result.sent_bytes << '\n'
+                         << "topk_transport_actions=" << result.transport_actions << '\n'
+                         << "topk_mirror_exchanges=" << result.mirror_exchanges << '\n'
+                         << "topk_rtt_rounds=" << result.mirror_exchanges << '\n'
+                         << "topk_logical_rounds=" << result.logical_rounds << '\n'
+                         << "timer_scope=distance_label_shares_and_network_ready_to_selected_k_shares_ready\n"
+                         << "network_env=" << network_profile << '\n'
+                         << "voting=NOT_RUN\n"
+                         << "correctness=NOT_CHECKED\n\n";
+                }
+            }
+
+            if (playerno == 0)
+            {
+                const auto mean = [](const vector<double>& values) {
+                    return accumulate(values.begin(), values.end(), 0.0) /
+                            values.size();
+                };
+                const double mean_ms = mean(times);
+                double sum_sq = 0;
+                for (double value : times)
+                    sum_sq += (value - mean_ms) * (value - mean_ms);
+                const double sd = times.size() > 1
+                        ? sqrt(sum_sq / (times.size() - 1)) : 0;
+                cout << fixed << setprecision(6)
+                     << "dataset=" << dataset_name << '\n'
+                     << "trials=" << trial_count << '\n'
+                     << "comparators=" << shape.comparators << '\n'
+                     << "network_depth=" << shape.network_depth << '\n'
+                     << "network_profile=" << network_profile << '\n'
+                     << "hybrid_threshold=" << hybrid_threshold << '\n'
+                     << "b2a_chunks=" << shape.b2a_chunks << '\n'
+                     << "dcf_chunks=" << shape.dcf_chunks << '\n'
+                     << "swap_chunks=" << shape.swap_chunks << '\n'
+                     << "chunks=" << shape.b2a_chunks + shape.dcf_chunks << '\n'
+                     << "pcr_layers=" << shape.pcr_layers << '\n'
+                     << "dcf_layers=" << shape.dcf_layers << '\n'
+                     << "pcr_comparators=" << shape.pcr_comparators << '\n'
+                     << "dcf_comparators=" << shape.dcf_comparators << '\n'
+                     << "topk_mean_ms=" << mean_ms << '\n'
+                     << "topk_sample_sd_ms=" << sd << '\n'
+                     << "topk_mean_sent_bytes=" << mean(bytes) << '\n'
+                     << "topk_mean_transport_actions=" << mean(actions) << '\n'
+                     << "topk_mean_mirror_exchanges=" << mean(exchanges) << '\n'
+                     << "topk_mean_rtt_rounds=" << mean(exchanges) << '\n'
+                     << "topk_mean_logical_rounds=" << mean(logical) << '\n';
+            }
+            delete player;
+            return 0;
+        }
+
         auto shares = build_shares(n);
         if (playerno == 0)
             cout << "mode=" << mode << endl;

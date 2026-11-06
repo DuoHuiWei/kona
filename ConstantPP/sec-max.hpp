@@ -13,17 +13,24 @@
 namespace ConstantPP
 {
 
+class SecMaxLocalFssL2;
+
 struct SecMaxStats
 {
     SecBComStats bcom;
     SecEqStats eq;
     std::uint64_t secure_mul_pairs = 0;
+    std::uint64_t local_fss_calls = 0;
+    double local_fss_ms = 0;
+    NamedCommStats rank_comm_before, rank_comm_after;
 
     void reset()
     {
         bcom.reset();
         eq.reset();
         secure_mul_pairs = 0;
+        local_fss_calls = 0; local_fss_ms = 0;
+        rank_comm_before.clear(); rank_comm_after.clear();
     }
 };
 
@@ -49,7 +56,8 @@ Ring sec_max_kona_dcf(
         const BeaverTripleParty& reused_mul_triple,
         KonaDcfCompare::Compare64<RING_BITS>& dcf_compare,
         ProtocolStats* protocol_stats = nullptr,
-        SecMaxStats* max_stats = nullptr);
+        SecMaxStats* max_stats = nullptr,
+        SecMaxLocalFssL2* performance_l2 = nullptr);
 
 } // namespace ConstantPP
 

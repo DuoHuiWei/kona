@@ -16,7 +16,7 @@ namespace KonaShareConversion
 template<int K>
 using RingShare = Z2<K>;
 
-static const size_t KONA_DEFAULT_BATCH_CHUNK = 16348;
+static const size_t KONA_DEFAULT_BATCH_CHUNK = 16384;
 
 template<int K>
 std::vector<RingShare<K>> open_additive_batch_l2(
@@ -74,8 +74,7 @@ void mul_additive_kona_l2(
     octetStream send_os, receive_os;
     (x1 - a).pack(send_os);
     (x2 - b).pack(send_os);
-    player->send(send_os);
-    player->receive(receive_os);
+    player->exchange_concurrent(send_os, receive_os);
 
     RingShare<K> peer_e, peer_f;
     peer_e.unpack(receive_os);
@@ -107,8 +106,7 @@ void mul_vector_additive_kona_l2(
         (v2[i] - b).pack(send_os);
     }
 
-    player->send(send_os);
-    player->receive(receive_os);
+    player->exchange_concurrent(send_os, receive_os);
 
     for (size_t i = 0; i < v1.size(); i++)
     {
@@ -157,8 +155,7 @@ void mul_vector_additive_kona_l2(
         (v2[i] - b).pack(send_os);
     }
 
-    player->send(send_os);
-    player->receive(receive_os);
+    player->exchange_concurrent(send_os, receive_os);
 
     std::vector<RingShare<K>> tmp(v1.size() * 2);
     for (size_t i = 0; i < half_size; i++)
@@ -268,8 +265,7 @@ std::vector<RingShare<K>> exchange_ring_vector_l2(
     for (auto& x : local)
         x.pack(send_os);
 
-    player->send(send_os);
-    player->receive(receive_os);
+    player->exchange_concurrent(send_os, receive_os);
 
     std::vector<RingShare<K>> peer(local.size());
     for (auto& x : peer)
@@ -574,7 +570,8 @@ RingShare<K> xor_bit_to_arithmetic_bit_l2(
 template<int K>
 std::vector<RingShare<K>> xor_bit_to_arithmetic_bit_batch_l2(
         const std::vector<RingShare<K>>& xor_bit_shares,
-        RealTwoPartyPlayer* player)
+        RealTwoPartyPlayer* player,
+        size_t chunk_size = KONA_DEFAULT_BATCH_CHUNK)
 {
     std::vector<RingShare<K>> b0(xor_bit_shares.size(), RingShare<K>(0));
     std::vector<RingShare<K>> b1(xor_bit_shares.size(), RingShare<K>(0));
@@ -589,7 +586,8 @@ std::vector<RingShare<K>> xor_bit_to_arithmetic_bit_batch_l2(
     }
 
     std::vector<RingShare<K>> products;
-    mul_vector_additive_kona_l2_chunked<K>(b0, b1, products, player);
+    mul_vector_additive_kona_l2_chunked<K>(
+            b0, b1, products, player, chunk_size);
 
     std::vector<RingShare<K>> result(xor_bit_shares.size());
     for (size_t i = 0; i < xor_bit_shares.size(); i++)
@@ -622,9 +620,11 @@ RingShare<K> B2A_l2(RingShare<K> xor_share, RealTwoPartyPlayer* player)
 template<int K>
 std::vector<RingShare<K>> B2A_batch_l2(
         const std::vector<RingShare<K>>& xor_shares,
-        RealTwoPartyPlayer* player)
+        RealTwoPartyPlayer* player,
+        size_t chunk_size = KONA_DEFAULT_BATCH_CHUNK)
 {
-    return xor_bit_to_arithmetic_bit_batch_l2<K>(xor_shares, player);
+    return xor_bit_to_arithmetic_bit_batch_l2<K>(
+            xor_shares, player, chunk_size);
 }
 
 template<int K>

@@ -1,3 +1,4 @@
+#include "kona-bench-affinity.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -25,7 +26,7 @@ namespace
 {
 
 const int K = 64;
-const int WAN_WORKLOAD_AWARE_PCR_MIN_COMPARATORS = 2048;
+const int WAN_WORKLOAD_AWARE_PCR_MIN_COMPARATORS = 2816;
 
 int playerno = 0;
 ez::ezOptionParser opt;
@@ -148,7 +149,7 @@ void parse_argv(int argc, const char** argv)
             "Backend policy: pcr, dcf, workload-aware", "-m", "--mode");
     opt.add("1024", 0, 1, 0, "Comma-separated n list", "-n", "--sizes");
     opt.add("5", 0, 1, 0, "Top-k", "-k", "--topk");
-    opt.add("2048", 0, 1, 0,
+    opt.add("2816", 0, 1, 0,
             "WAN workload-aware threshold: use PCR when comparator_count >= this value",
             "-t", "--workload-threshold");
     opt.add("0", 0, 1, 0,
@@ -264,9 +265,8 @@ vector<int> parse_sizes(const string& text)
 
 Backend select_backend(size_t comparator_count, int workload_threshold)
 {
-    // WAN workload-aware source: kona-cong-layer-wan-load-sweep-bench.x
-    // found m=2048 as the first candidate region where PCR can become
-    // resource/multitask-attractive. This is not a LAN latency threshold.
+    // WAN single-layer latency calibration found the crossover at
+    // 2808 < m <= 2816. This reverse-threshold entry uses PCR from 2816.
     return comparator_count >= static_cast<size_t>(workload_threshold) ?
             Backend::PCR : Backend::DCF;
 }
@@ -472,6 +472,7 @@ TopkBenchResult benchmark_cong_topk(
 int main(int argc, const char** argv)
 {
     parse_argv(argc, argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
     RealTwoPartyPlayer* player = start_networking();
 
     try

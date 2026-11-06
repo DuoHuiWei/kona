@@ -12,6 +12,7 @@
 #include "Networking/Player.h"
 #include "Machines/kona-pcr-compare.hpp"
 #include "Machines/kona-share-conversion.hpp"
+#include "Machines/kona-mask-vote.hpp"
 
 namespace KonaMatrixTopK
 {
@@ -196,41 +197,8 @@ inline void matrix_topk_vote_with_pcr(
     secure_topk_mask_from_rank_with_pcr<K>(
             rank_share, k, topk_mask_share, player);
 
-    const size_t n = shares.size();
-    std::vector<Z2<K>> labels(n);
-    for (size_t i = 0; i < n; i++)
-        labels[i] = shares[i][1];
-
-    label_count_array.assign(num_label, SharePair<K>{Z2<K>(0), Z2<K>(0)});
-    std::vector<Z2<K>> ones = public_constants_batch<K>(n, 1, player);
-
-    for (int label = 0; label < num_label; label++)
-    {
-        std::vector<Z2<K>> public_label =
-                public_constants_batch<K>(n, (uint64_t)label, player);
-
-        std::vector<Z2<K>> lt =
-                KonaPcrCompare::pcr_compare_lt_batch_l2(labels, public_label, player);
-        std::vector<Z2<K>> gt =
-                KonaPcrCompare::pcr_compare_gt_batch_l2(labels, public_label, player);
-
-        std::vector<Z2<K>> eq(n);
-        for (size_t i = 0; i < n; i++)
-            eq[i] = ones[i] - lt[i] - gt[i];
-
-        std::vector<Z2<K>> selected_eq;
-        KonaShareConversion::mul_vector_additive_kona_l2_chunked<K>(
-                topk_mask_share, eq, selected_eq, player);
-
-        Z2<K> count(0);
-        for (size_t i = 0; i < n; i++)
-            count += selected_eq[i];
-
-        label_count_array[label][0] = count;
-        label_count_array[label][1] =
-                KonaShareConversion::public_to_additive_l2<K>(
-                        Z2<K>(static_cast<mp_limb_t>(label)), player);
-    }
+    KonaMaskVote::label_counts_with_pcr<K>(
+            shares, topk_mask_share, num_label, label_count_array, player);
 }
 
 } // namespace KonaMatrixTopK

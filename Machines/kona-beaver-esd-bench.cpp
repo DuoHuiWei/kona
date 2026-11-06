@@ -1,3 +1,4 @@
+#include "kona-bench-affinity.hpp"
 #include <chrono>
 #include <iostream>
 #include <string>
@@ -280,6 +281,7 @@ public:
 int main(int argc, const char** argv)
 {
     parse_argv(argc, argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
     BeaverEsdBenchParty party(playerno);
     party.start_networking(opt);
 

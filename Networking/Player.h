@@ -542,6 +542,20 @@ public:
   void receive(octetStream& o) const;
   void send_receive_player(vector<octetStream>& o) const;
 
+  // Independent outgoing and incoming messages, using the existing framed
+  // nonblocking Exchanger without worker threads. Preserve legacy accounting:
+  // two directional actions, one sent payload and one logical exchange.
+  // Charge the overlapping wall interval once to the combined entry.
+  void exchange_concurrent(const octetStream& outgoing, octetStream& incoming) const
+  {
+    ++VirtualTwoPartyPlayer_Round;
+    auto& stats = comm_stats["Exchanging full-duplex"];
+    TimeScope scope(stats.add(outgoing));
+    comm_stats.sent += outgoing.get_length();
+    P.exchange_no_stats(other_player, outgoing, incoming);
+    stats.add(incoming);
+  }
+
   void pass_around(octetStream& o, int _ = 1) const { (void)_, (void) o; throw not_implemented(); }
 
   size_t send(const PlayerBuffer& buffer, bool block) const;

@@ -308,7 +308,7 @@ measured_transport_actions
 
 如果由于以下原因：
 
-- chunk_size = 16348
+- chunk_size = 16384
 - 单核资源限制
 - 消息大小限制
 - 实现中为了 batching / packing / memory control 做了串行分块
@@ -476,3 +476,116 @@ benchmark 启动脚本应打印或记录：
     + 完整保留真实在线协议动作
 
 在此前提下比较各方案性能。
+
+
+==================================================
+十三、重复实验与交错运行规则
+==================================================
+
+正式对比实验不得只依赖单次结果。对于 wall time 在百毫秒级、且包含 DCF evaluate 或容器 netem 的实验，必须默认报告：
+
+    mean
+    median
+    std
+    CV
+    min
+    max
+    p25
+    p75
+
+如果比较两个或多个方案，运行顺序必须尽量交错，而不是：
+
+    A A A A A
+    B B B B B
+
+推荐使用：
+
+    A B B A A B B A ...
+
+或等价的 balanced interleaving。这样可以降低升温、系统负载漂移、后台进程和 Docker/netem 状态变化造成的顺序偏置。
+
+不得为了让结果更好看删除 outlier。若出现明显 outlier，应同时报告：
+
+    原始 trial 序列
+    outlier 所在 order
+    online_ms / compute_ms / comm_ms
+    协议特定计时，例如 dcf_evaluate_ms
+
+并在结论中说明它是否影响 mean、median 和最终判断。
+
+
+==================================================
+十四、结构不变控制组与归因规则
+==================================================
+
+每次修改网络结构或 benchmark 统计口径后，应选择至少一个结构不变的 sanity/control case 复验。例如 reduced-depth Cong tail 修改中，r=0 的 case 可作为控制组。
+
+控制组需要检查：
+
+    comparator_count 是否一致
+    structural_depth 是否一致
+    sent_bytes 是否一致
+    logical_rounds 是否一致
+    PCR/DCF stages 是否一致
+    PCR/DCF comparator 数是否一致
+
+如果这些结构指标一致，但 online_ms 出现差异，不得直接归因为算法变化。优先解释为：
+
+    run-to-run variance
+    DCF evaluate CPU 时间抖动
+    OS 调度
+    Docker/netem 抖动
+    本机其他负载
+    CPU frequency / thermal state
+
+跨日期、跨编译状态、跨网络配置的结果只能作为参考，不能作为强因果结论。需要证明某个实现改变带来性能收益时，必须在同一天、同脚本、同 CPU 绑定、同网络 profile 下交错运行。
+
+
+==================================================
+十五、阶段级诊断规则
+==================================================
+
+如果某个方案出现异常退化，先做 stage-level profiling，不要立刻改算法或调 threshold。
+
+至少检查：
+
+    old/new 是否调用相同 compare 实现
+    old/new 是否调用相同 secure swap 实现
+    DCF key/init 是否进入 online timer
+    同层 comparator 是否仍然 batch 执行
+    communication before/after 是否和 online timer 同边界
+    异常来自 PCR stage、DCF stage、swap、comm wait 还是系统调度
+
+如果当前 benchmark 已经输出 LEVEL/stage 日志，应优先复用现有日志，只在必要时增加 timing wrapper。不要为诊断重写协议。
+
+阶段级诊断输出建议包括：
+
+    order
+    scheme
+    phase
+    stage_index
+    width
+    backend
+    stage_total_ms
+    stage_comm_ms
+    sent_bytes
+    transport_rounds
+
+如果无法拆 compare_ms 和 swap_ms，必须明确说明当前只统计 compare+swap 的 stage_total_ms。
+
+
+==================================================
+十六、论文表格使用规则
+==================================================
+
+论文主表优先使用同批次、交错运行、同 profile 的结果。对于噪声敏感的小规模 LAN case，不要只报告 mean；至少同时看 median 和 std。
+
+当 mean 与 median 结论冲突时，应检查原始 trial 序列并说明是否存在偶发慢 trial。不能只选择有利指标。
+
+理论结构指标和实测性能要分开写：
+
+    comparator_count / structural_depth 说明网络结构
+    sent_bytes / logical_rounds 说明实际通信负担
+    online_ms / compute_ms / comm_ms 说明实测性能
+
+如果结构指标显示方案 A 更浅但 comparator 更多，那么结论必须写成 tradeoff，而不是简单说 A 更优。

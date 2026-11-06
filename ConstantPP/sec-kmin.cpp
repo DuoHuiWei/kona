@@ -54,8 +54,15 @@ std::vector<Ring> sec_kmin_kona_dcf(
         KonaDcfCompare::Compare64<RING_BITS>& dcf_compare,
         ProtocolStats* protocol_stats,
         SecBComStats* bcom_stats,
-        SecKMinStats* kmin_stats)
+        SecKMinStats* kmin_stats,
+        SecKMinTrace* trace)
 {
+    const auto capture = [&](std::size_t i) {
+        if (trace) {
+            trace->boundaries[i].comm = player->total_comm();
+            trace->boundaries[i].time = std::chrono::steady_clock::now();
+        }
+    };
     if (!player)
         throw std::invalid_argument(
                 "ConstantPP SecKMin: null RealTwoPartyPlayer");
@@ -96,6 +103,7 @@ std::vector<Ring> sec_kmin_kona_dcf(
 
     const auto& shuffled_distance = shuffled[0];
     const auto& shuffled_label = shuffled[1];
+    capture(0);
 
     /*
      * Edge case k == n:
@@ -132,6 +140,7 @@ std::vector<Ring> sec_kmin_kona_dcf(
                     dcf_compare,
                     protocol_stats,
                     bcom_stats);
+    capture(1);
 
     /*
      * Repository-style threshold stage:
@@ -197,6 +206,7 @@ std::vector<Ring> sec_kmin_kona_dcf(
             true);
 
     const auto after = dcf_compare.get_stats();
+    capture(2);
 
     if (protocol_stats)
         ++protocol_stats->logical_rounds;
@@ -255,6 +265,7 @@ std::vector<Ring> sec_kmin_kona_dcf(
                  before.evaluate_time).count() * 1000.0;
     }
 
+    capture(3);
     return selected_labels;
 }
 

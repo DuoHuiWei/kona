@@ -1,3 +1,4 @@
+#include "../../Machines/kona-bench-affinity.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
@@ -76,6 +77,7 @@ vector<uint64_t> reveal(RealTwoPartyPlayer* P,int p,
 int main(int argc,const char** argv)
 {
     parse_argv(argc,argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
     auto* P=network();
 
     const vector<uint64_t> plain={7,7,2,9};

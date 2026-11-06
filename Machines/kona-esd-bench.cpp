@@ -1,3 +1,4 @@
+#include "kona-bench-affinity.hpp"
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -310,6 +311,7 @@ public:
 int main(int argc, const char** argv)
 {
     parse_argv(argc, argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
     EsdBenchParty party(playerno);
     party.start_networking(opt);
 

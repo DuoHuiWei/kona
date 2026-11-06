@@ -1,3 +1,4 @@
+#include "../../Machines/kona-bench-affinity.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
@@ -48,7 +49,9 @@ vector<uint64_t> reveal(RealTwoPartyPlayer* P,int p,const vector<ConstantPP::Rin
 }
 }
 int main(int argc,const char** argv){
-    parse_argv(argc,argv);auto*P=network();
+    parse_argv(argc,argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
+    auto*P=network();
     const vector<uint64_t> labels={1,2,1,3,1};
     auto s=share(labels,playerno);
     KonaDcfCompare::Compare64<64> dcf(P,playerno);

@@ -24,7 +24,7 @@ class Compare64
     static_assert(K == 64, "KonaDcfCompare::Compare64 currently targets Z2<64>");
 
     static const int LAMBDA_BYTES = 16;
-    static const size_t MAX_COMPARE_CHUNK = 16348;
+    static const size_t MAX_COMPARE_CHUNK = 16384;
 
 public:
     struct Stats
@@ -112,7 +112,7 @@ private:
             const std::vector<SignedZ2<K>>& xs,
             std::vector<Z2<K>>& outputs)
     {
-        auto start = std::chrono::high_resolution_clock::now();
+        auto start = std::chrono::steady_clock::now();
         const size_t batch_size = xs.size();
         stats.evaluate_calls += batch_size;
 
@@ -175,7 +175,7 @@ private:
             outputs[idx] = Z2<K>(static_cast<mp_limb_t>(out));
         }
 
-        auto end = std::chrono::high_resolution_clock::now();
+        auto end = std::chrono::steady_clock::now();
         stats.evaluate_time += end - start;
     }
 
@@ -232,7 +232,8 @@ public:
             const std::vector<Z2<K>>& shares,
             const std::vector<int>& compare_idx_vec,
             std::vector<Z2<K>>& compare_res,
-            bool greater_than)
+            bool greater_than,
+            size_t chunk_size = MAX_COMPARE_CHUNK)
     {
         assert(compare_idx_vec.size() && compare_idx_vec.size() == compare_res.size());
         const int size_res = int(compare_idx_vec.size() / 2);
@@ -240,9 +241,9 @@ public:
         compare_res.resize(compare_idx_vec.size());
         SignedZ2<K> alpha_share = cache.alpha_share;
 
-        for (int offset = 0; offset < size_res; offset += (int)MAX_COMPARE_CHUNK)
+        for (int offset = 0; offset < size_res; offset += (int)chunk_size)
         {
-            const int len = std::min<int>((int)MAX_COMPARE_CHUNK, size_res - offset);
+            const int len = std::min<int>((int)chunk_size, size_res - offset);
             compare_local.resize(len);
             compare_revealed.resize(len);
             compare_eval_inputs.resize(2 * len);
@@ -262,8 +263,7 @@ public:
             octetStream send_os, receive_os;
             for (int i = 0; i < len; i++)
                 compare_local[i].pack(send_os);
-            player->send(send_os);
-            player->receive(receive_os);
+            player->exchange_concurrent(send_os, receive_os);
 
             for (int i = 0; i < len; i++)
             {
@@ -301,7 +301,8 @@ public:
             const std::vector<std::array<Z2<K>, 2>>& shares,
             const std::vector<int>& compare_idx_vec,
             std::vector<Z2<K>>& compare_res,
-            bool greater_than)
+            bool greater_than,
+            size_t chunk_size = MAX_COMPARE_CHUNK)
     {
         assert(compare_idx_vec.size() && compare_idx_vec.size() == compare_res.size());
         const int size_res = int(compare_idx_vec.size() / 2);
@@ -312,7 +313,9 @@ public:
         std::vector<int> identity_idx(2 * size_res);
         for (int i = 0; i < 2 * size_res; i++)
             identity_idx[i] = i;
-        compare_in_vec(first_component, identity_idx, compare_res, greater_than);
+        compare_in_vec(
+                first_component, identity_idx, compare_res,
+                greater_than, chunk_size);
     }
 };
 

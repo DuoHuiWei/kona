@@ -141,7 +141,7 @@ KonaShareConversion::mul_vector_additive_kona_l2(...)
 当前通用批量路径已经引入默认挡位：
 
 ```text
-KONA_DEFAULT_BATCH_CHUNK = 16348
+KONA_DEFAULT_BATCH_CHUNK = 16384
 ```
 
 位置：
@@ -163,7 +163,7 @@ KONA_DEFAULT_BATCH_CHUNK = 16348
 ```text
 除针对 seq-ran / tcga 这类 ESD 距离核专项实验外，
 其他通用大整块 / 大批量的 Beaver 乘法、份额转换、批量打开等动作，
-默认优先切成 size = 16348 的批次执行。
+默认优先切成 size = 16384 的批次执行。
 ```
 
 ---
@@ -306,8 +306,8 @@ KONA_DEFAULT_BATCH_CHUNK = 16348
 
 ```text
 在当前工程实现里，
-16348 适合作为通用默认挡位；
-若专门针对高延迟 WAN，可再考虑放大到 32696。
+16384 适合作为通用默认挡位；
+若专门针对高延迟 WAN，可再考虑放大到 32768。
 ```
 
 ---

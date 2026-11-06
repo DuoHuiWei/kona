@@ -1,0 +1,15 @@
+.git
+.git/**
+.agents
+.codex
+KNN-experiment-res/
+reports/
+**/__pycache__/
+**/*.pyc
+**/*.log
+**/*.tar
+**/*.tar.gz
+**/*.zip
+**/*.pdf
+**/*.csv
+**/*.Zone.Identifier

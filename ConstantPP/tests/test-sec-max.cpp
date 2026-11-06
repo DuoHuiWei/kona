@@ -1,3 +1,4 @@
+#include "../../Machines/kona-bench-affinity.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
@@ -54,7 +55,9 @@ uint64_t reveal(RealTwoPartyPlayer* P,int p,const ConstantPP::Ring& x){
 }
 }
 int main(int argc,const char** argv){
-    parse_argv(argc,argv);auto*P=network();
+    parse_argv(argc,argv);
+    KonaBenchAffinity::bind_fixed_cpu(playerno);
+    auto*P=network();
     /*
      * Maximum-frequency tie with DIFFERENT labels:
      *

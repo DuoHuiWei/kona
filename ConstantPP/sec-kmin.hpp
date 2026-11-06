@@ -2,6 +2,8 @@
 #define CONSTANTPP_SEC_KMIN_HPP_
 
 #include <cstddef>
+#include <array>
+#include <chrono>
 #include <vector>
 
 #include "../Machines/kona-dcf-compare.hpp"
@@ -12,6 +14,18 @@
 
 namespace ConstantPP
 {
+
+// Optional benchmark boundary snapshots only; no change to protocol operations.
+// 0: shuffle ready; 1: ranks ready; 2: threshold bits ready;
+// 3: bits opened and selected label shares ready. Summarize after online timing.
+struct SecKMinTrace
+{
+    struct Boundary {
+        NamedCommStats comm;
+        std::chrono::steady_clock::time_point time;
+    };
+    std::array<Boundary, 4> boundaries;
+};
 
 struct SecKMinStats
 {
@@ -64,7 +78,8 @@ std::vector<Ring> sec_kmin_kona_dcf(
         KonaDcfCompare::Compare64<RING_BITS>& dcf_compare,
         ProtocolStats* protocol_stats = nullptr,
         SecBComStats* bcom_stats = nullptr,
-        SecKMinStats* kmin_stats = nullptr);
+        SecKMinStats* kmin_stats = nullptr,
+        SecKMinTrace* trace = nullptr);
 
 } // namespace ConstantPP
 

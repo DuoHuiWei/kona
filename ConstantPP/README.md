@@ -276,3 +276,127 @@ For SecKMin this means:
 - securely evaluate `u_i = 1{su_i > n-k-1}`;
 - open only the final indicator bits `u_i`;
 - normal benchmark cases `1 <= k < n` execute the full five-round path.
+
+
+## v0.4: SecEqTest, SecFre, SecMax
+
+### SecEqTest
+
+The public repository uses one Eq-FSS key pair repeatedly over a batch.
+Kona currently exposes the validated DCF comparator rather than the
+repository's DPF equality primitive, so this unified implementation computes
+
+`1{x=y} = 1 - 1{x<y} - 1{y<x}`
+
+with two strict Kona comparisons packed into one `Compare64` call.
+
+Consequences:
+
+- no plaintext equality test;
+- real two-process communication;
+- one ConstantPP logical equality round;
+- two Kona secure-comparison pairs per equality predicate;
+- therefore equality is somewhat heavier than the repository's native
+  Eq-FSS evaluator. This must be reported when interpreting absolute
+  performance.
+
+### SecFre
+
+The repository's upper-triangle frequency logic is preserved exactly:
+
+- compare labels only for `i<j`;
+- one equality result increments both frequency shares;
+- each position gets a public self-count of one.
+
+All pair equalities are batched into one SecEqTest stage, so normal `k>=2`
+SecFre contributes one logical round.
+
+### SecMax
+
+The repository control flow is preserved:
+
+1. `SecBCom(frequency, Greater)`;
+2. `SecEqTest(su_i, k-1)`;
+3. `SecMul(label_i, indicator_i)`;
+4. local sum.
+
+The same Beaver triple is reused for the vector multiplication, matching the
+repository engineering behavior accepted by this baseline. For normal
+`k>=2`, SecMax contributes exactly three logical rounds.
+
+
+## v0.4.1 static-review fixes
+
+- `sec-eq.cpp` now uses the correct nested Kona stats type:
+  `KonaDcfCompare::Compare64<RING_BITS>::Stats`.
+- `test-sec-max.cpp` now uses different labels for tied maximum-frequency
+  entries, so the test validates that the source-like upper-triangle
+  complement rule selects exactly one deterministic winner instead of
+  passing merely because all tied entries happened to share the same label.
+
+
+## v0.5: SecKC end-to-end pipeline
+
+SecKC combines all ConstantPP components:
+
+1. SecED
+2. SecKMin
+3. SecFre
+4. SecMax
+
+The expected normal execution path is:
+
+```
+SecED   : 1 logical round
+SecKMin : 5 logical rounds
+SecFre  : 1 logical round
+SecMax  : 3 logical rounds
+
+Total   : 10 logical rounds
+```
+
+The implementation keeps ConstantPP algorithm structure while using Kona
+two-party communication and DCF primitives.
+
+## SecMax local-FSS performance mode (2026-11-04)
+
+Only the SecMax rank-comparison stage has a new optional path. SecFre,
+distance, Top-k, the shared Kona/PCR components, the later maximum-indicator
+equality and label multiplication remain unchanged. The output remains the
+winning label's additive share; the data bench reveals it only for validation
+after online timing and communication snapshots.
+
+`constantpp-test-sec-kc-data.x` defaults to
+`--secmax-mode paper-local-l2`. Select `--secmax-mode legacy` for the previous
+path. Existing component API callers retain the legacy default unless they
+explicitly supply the new `SecMaxLocalFssL2` adapter.
+
+The adapter is confined to `secmax-local-fss-l2.hpp`. It exchanges the k
+frequency shares once (8k sent bytes per party), then performs actual local
+DCF evaluations for the unordered pairs. It preserves the existing reverse
+complement and later-index tie rule. There are k(k-1) real local FSS evaluations;
+local batching at 16384 pairs introduces no further communication. Parsing,
+key-cache initialization and pair planning occur before the online timer.
+
+This is an explicitly authorized **performance-only, insecure L2 mode**:
+frequency masks are zero, both test r shares are read offline and one test
+key cache is reused. It reconstructs frequencies and provides no privacy.
+The local evaluator was extracted from the existing private Kona evaluator
+without modifying the shared component. This is not a security implementation
+of the paper's pair-specific key preprocessing, nor an exact reproduction of
+its computation cost. In particular, SecFre and maximum-indicator equality
+still use the existing Kona-based equality, rather than native paper DPF.
+
+Raw output records `secmax_mode`, `secmax_security`, rank-stage sent bytes,
+transport actions, exchange count and local FSS calls/time. Local calls are
+also included in vote/online evaluation totals. Rank byte/action/call counts
+and full stage accounting are checked after the online timer.
+
+Small two-party regressions cover k=1,2,3,5,20,100 and compare legacy/new
+labels, accounting and unchanged distance/Top-k counters. For k>=2, total
+vote bytes per party change from `12k²+20k` to `8k²+32k`; k=1 retains its
+zero-communication shortcut. Thus k=2 uses more bytes and k=3 is equal;
+the reduction starts at k=4. The normal SecFre/SecMax logical rounds remain
+1+3. Results: `KNN-experiment-res/constantpp-secmax-local-l2-20261104/`.
+Historical results collected with the legacy path must remain distinguished
+from this new mode.

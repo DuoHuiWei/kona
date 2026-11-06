@@ -62,6 +62,13 @@ Then make source edits in WSL, re-run `bash Scripts/codex-container-build.sh`, a
 
 ## Benchmark Rules
 
+- Default to running one scheme at a time, as requested by the user on 2026-11-04. Do not start another scheme while its experiment is active.
+- Freeze measured source files, shared launchers, and build scripts throughout a formal experiment. Do not develop or refactor a different scheme through shared files while the user is running a batch; keep drafts outside the active source tree until the run ends.
+- If an experiment is interrupted, preserve completed results and verify source/binary/input identities before recovering missing trials. Never disable source-change checks to accept mixed builds.
+
+- Fixed CPU mapping for this project: P0 uses logical CPU 0; P1 uses logical CPU 2. Single-process setup/structure experiments use CPU 0. Do not automatically select replacement CPUs or accept other CPU overrides.
+- Preserve the location of existing affinity controls (C++ or launcher). For newly added or subsequently modified experiments, prefer binding in the C++ bench before networking, worker creation, and timing via `Machines/kona-bench-affinity.hpp`; use the launcher/command only when the bench cannot control it, and document why. Conflicting inherited affinity must fail rather than be silently overridden.
+- Affinity is not physical-core exclusivity. Record topology and isolation evidence; never claim strict core exclusivity merely because taskset/sched_setaffinity succeeded. See `docs/bench_cpu_affinity.md` and section 13 of `docs/bench_recording_protocol.md`.
 - Every benchmark/test entry should record detailed metrics, not just total runtime.
 - Benchmark output should include whenever meaningful:
   - dataset / scale / backend
@@ -74,6 +81,10 @@ Then make source edits in WSL, re-run `bash Scripts/codex-container-build.sh`, a
   - phase-level timing breakdown, for example read/setup/compute/preprocess phases
 - Prefer benchmark designs that call original components directly and only wrap them with timing / accounting.
 - If there is any ambiguity about what should be measured or which phases belong in a benchmark, ask the user before proceeding.
+- For comparative benchmarks, prefer interleaved execution over running all trials of one scheme before the next. Report raw trial order plus mean/median/std/CV/min/max when results are noise-sensitive.
+- Use structure-invariant control cases when available. If comparator count, depth, bytes, rounds, and backend split are unchanged, do not attribute timing differences to algorithmic changes without same-run interleaved evidence.
+- Treat cross-date benchmark comparisons as provisional. Strong performance claims should come from the same script, same build, same network profile, same CPU affinity, and interleaved runs.
+- When a regression appears, inspect stage-level timing first; do not tune thresholds or change algorithms before locating whether the issue is PCR, DCF, swap, communication, or system scheduling.
 
 ## Baseline Command Pattern
 
@@ -128,3 +139,24 @@ The following baseline was observed after running `bash Scripts/codex-container-
 - Reuse Kona multiplication where requested by the user; do not silently replace it with a different backend.
 - If adding share conversion or PCR/Cong components, integrate them from WSL source files and validate only through the `kona-dev` container.
 - For backend changes such as DCF replacement, prefer a reversible integration path until the user explicitly asks to remove the old path.
+
+## Current Experiment Entries (2026-11-04)
+
+- The current ConstantPP / SecKNN / original KONA / pruned-hybrid / Shao workflow has exactly two maintained experiment files: `Machines/knn-bench.cpp` and `Scripts/run-knn-experiment.py`.
+- Launch the Python script directly; do not add shell launchers, per-scheme scripts, benchmark wrappers, or new per-scheme build targets. Extend its scheme/scope arguments when needed.
+- Existing protocol modules, independent component regressions, network/build/log utilities and historical result archives remain separate dependencies, not additional experiment launch entries.
+- Freeze related source, scripts and build identity throughout an active batch. Do not edit/rebuild them during a user's experiment. Run schemes serially.
+
+- Shao classifier: NHSS distance, pure Rotated-MSB Cong on all layers, batched DCF category vote. Do not apply PCR/DCF hybrid width cutoffs to this scheme.
+
+- ConstantPP performance experiments use `--secmax-mode paper-local-l2` by default. Preserve existing recorded results; legacy is only for an explicitly requested historical/control comparison. Do not silently switch or relabel prior runs.
+
+- Clarified KONA performance baseline: the user means the pre-reinstall cached/batched-DCF mainpath (`Machines/kona-mainpath-esd-topk-dcf-bench.cpp`), not the native per-evaluation key-file implementation. Full-flow runs must explicitly select `--kona-backend batched-dcf` and verify that exact mode in raw logs. Keep `original` only as an explicitly named native control; never silently substitute it when a batch-DCF scope is unsupported.
+- SecKNN correction (explicit user instruction, 2026-11-06): preserve `KNN_party_SecKNN::top_1()` native serial `(i,last)` scan for both Top-k and vote maximum, including strict-comparison tie order. The historical layered/tournament substitution is disabled in maintained entries. Independent send/receive overlap is permitted; replacing the selection graph is not. Results marked `secknn-layer-batched` / `topk_mode=layered` are historical algorithm variants and must not be presented as original SecKNN with engineering-only changes. This supersedes the earlier acceptance of layered mode.
+
+## Independent-message transport (2026-11-04)
+
+- Formal WAN is 40 Mbps per direction with 20 ms added one-way delay. Temporary 10 ms diagnostic settings must be cleared; preserve historical result labels.
+- In performance paths, when both outgoing messages are ready and neither depends on the incoming message, use `RealTwoPartyPlayer::exchange_concurrent` to reuse the framed nonblocking Exchanger. Keep dependent response steps in their original order.
+- Preserve payload, chunk size, algorithms and comparison/swap policy. The new API counts two directional actions and one logical exchange; overlapping communication time is recorded once. Do not double sent bytes or infer a rate-limit error from one party's bytes divided by a serialized two-direction phase duration.
+- Retain explicitly named native historical controls; the current KONA performance baseline remains explicit `--kona-backend batched-dcf`. Freeze networking/exchanger/octetStream source identities during experiments.

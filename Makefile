@@ -207,7 +207,34 @@ secure.x: Utils/secure.o
 Fake-Offline.x: Utils/Fake-Offline.o $(VM)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS)
 
-constantpp-tests: constantpp-test-sec-ed.x constantpp-test-sec-shuffle.x constantpp-test-sec-bcom.x constantpp-test-sec-kmin.x constantpp-test-sec-eq.x constantpp-test-sec-fre.x constantpp-test-sec-max.x
+constantpp-tests: constantpp-test-sec-ed.x constantpp-test-sec-shuffle.x constantpp-test-sec-bcom.x constantpp-test-sec-kmin.x constantpp-test-sec-eq.x constantpp-test-sec-fre.x constantpp-test-sec-max.x constantpp-test-sec-kc.x constantpp-test-sec-kc-batch.x
+
+kona-nhss-distance-test.x: Machines/kona-nhss-distance-test.o $(SHAREDLIB)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) -lgmpxx -lgmp
+
+kona-rotated-msb-compare-test.x: Machines/kona-rotated-msb-compare-test.o $(MINI_OT) $(SHAREDLIB)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+kona-cong-rotated-msb-test.x: Machines/kona-cong-rotated-msb-test.o $(MINI_OT) $(SHAREDLIB)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+kona-nhss-cong-pipeline-test.x: Machines/kona-nhss-cong-pipeline-test.o $(MINI_OT) $(SHAREDLIB)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB) -lgmpxx -lgmp
+
+kona-nhss-distance-data-bench.x: Machines/kona-nhss-distance-data-bench.o ConstantPP/data-loader.o $(MINI_OT) $(SHAREDLIB)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB) -lgmpxx -lgmp
+
+kona-distance-only-bench.x: Machines/kona-distance-only-bench.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+kona-topk-network-bench.x: Machines/kona-topk-network-bench.o ConstantPP/data-loader.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+kona-cong-layer-pcr-dcf-crossover-bench.x: Machines/kona-cong-layer-pcr-dcf-crossover-bench.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+kona-cong-rmsb-dataset-size-bench.x: Machines/kona-cong-rmsb-dataset-size-bench.o $(MINI_OT) $(SHAREDLIB)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
 
 constantpp-test-sec-ed.x: ConstantPP/tests/test-sec-ed.o ConstantPP/sec-ed.o $(COMMON)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
@@ -230,6 +257,12 @@ constantpp-test-sec-fre.x: ConstantPP/tests/test-sec-fre.o ConstantPP/sec-fre.o 
 constantpp-test-sec-max.x: ConstantPP/tests/test-sec-max.o ConstantPP/sec-max.o ConstantPP/sec-bcom.o ConstantPP/sec-bcom-material.o ConstantPP/sec-eq.o ConstantPP/sec-mul.o $(COMMON)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
 
+constantpp-test-sec-kc.x: ConstantPP/tests/test-sec-kc.o ConstantPP/sec-kc.o ConstantPP/sec-ed.o ConstantPP/sec-kmin.o ConstantPP/sec-fre.o ConstantPP/sec-max.o ConstantPP/sec-shuffle.o ConstantPP/sec-bcom.o ConstantPP/sec-bcom-material.o ConstantPP/sec-eq.o ConstantPP/sec-mul.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+constantpp-test-sec-kc-batch.x: ConstantPP/tests/test-sec-kc-batch.o ConstantPP/sec-kc-batch.o ConstantPP/sec-ed-batch.o ConstantPP/sec-ed.o ConstantPP/sec-kmin.o ConstantPP/sec-fre.o ConstantPP/sec-max.o ConstantPP/sec-shuffle.o ConstantPP/sec-bcom.o ConstantPP/sec-bcom-material.o ConstantPP/sec-eq.o ConstantPP/sec-mul.o $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
 %.x: Utils/%.o $(COMMON)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS)
 
@@ -241,6 +274,12 @@ tree-inference.x: Machines/tree-inference.cpp  $(MINI_OT) $(SHAREDLIB)
 kona-he.x: CFLAGS += $(OPENFHE_CFLAGS)
 kona-he.x: Machines/kona-he.o
 	$(CXX) -o $@ $(CFLAGS) $^ $(OPENFHE_LDLIBS)
+
+kona-upstream.x: Machines/kona-upstream.o $(MINI_OT) $(SHAREDLIB)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
+
+knn-bench.x: Machines/knn-bench.o ConstantPP/data-loader.o ConstantPP/sec-kc-batch.o ConstantPP/sec-ed-batch.o ConstantPP/sec-ed.o ConstantPP/sec-kmin.o ConstantPP/sec-fre.o ConstantPP/sec-max.o ConstantPP/sec-shuffle.o ConstantPP/sec-bcom.o ConstantPP/sec-bcom-material.o ConstantPP/sec-eq.o ConstantPP/sec-mul.o $(MINI_OT) $(COMMON)
+	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
 
 %.x: Machines/%.o $(MINI_OT) $(SHAREDLIB)
 	$(CXX) -o $@ $(CFLAGS) $^ $(LDLIBS) $(SHAREDLIB)
