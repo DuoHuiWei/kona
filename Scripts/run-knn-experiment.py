@@ -336,13 +336,16 @@ def command_arguments(a,item):
     args=['--scheme',item['bench_scheme'],'--scope',item['scope'],'--dataset',a.dataset,
           '--k',str(item['k']),'--network-profile',policy]
     if item['scope'] in ['checkpoints','shared']:args += ['--ks',item['ks']]
+    if item['scope']=='checkpoints':args += ['--vote-order',item['ks']]
     if item['bench_scheme']=='kona':args += ['--kona-backend',a.kona_backend]
     if item['bench_scheme']=='secknn':args += ['--topk-mode',a.topk_mode]
     if item['bench_scheme']=='constantpp':args += ['--secmax-mode',a.secmax_mode]
     if item['bench_scheme']=='shao':args += ['--vote-labels',str(a.label_domain)]
-    if item['bench_scheme']=='hybrid':args += ['-n',str(a.n),'-m','pruned','-r','1','--warmup','0',
-        '--comparator',a.comparator,'--matrix-backend',a.matrix_backend,'--lan-threshold',str(a.lan_threshold),
-        '--wan-threshold',str(a.wan_threshold),'--vote-labels',str(a.label_domain)]
+    if item['bench_scheme']=='hybrid':
+        args += ['-n',str(a.n),'-m','pruned','-r','1','--warmup','0','--vote-labels',str(a.label_domain)]
+        if item['scope']!='vote':
+            args += ['--comparator',a.comparator,'--matrix-backend',a.matrix_backend,
+                '--lan-threshold',str(a.lan_threshold),'--wan-threshold',str(a.wan_threshold)]
     return args
 
 def parse(path,item):
@@ -585,6 +588,9 @@ for pid in matching():
                 if set(phases)!=expected(a,item):raise RuntimeError(f'{job}: missing/extra phases: {set(phases)}')
                 if meta.get('accounting_check')!='PASS' or meta.get('correctness')!='PASS':raise RuntimeError(f'{job}: accounting/correctness failed')
                 if meta.get('benchmark_scheme')!=item['bench_scheme'] or meta.get('benchmark_scope')!=item['scope']:raise RuntimeError('Wrong scheme/scope')
+                if item['scope']=='checkpoints':
+                    actual_order=[int(v) for v in re.findall(r'^VOTE_EXECUTION k=(\d+) ',paths[party].read_text(),re.M)]
+                    if actual_order!=list(map(int,item['ks'].split(','))):raise RuntimeError('Vote execution order differs from manifest')
                 if item['bench_scheme']=='secknn' and (meta.get('topk_mode')!='scalar' or meta.get('algorithm_identity')!='secknn-native-serial-scan'):
                     raise RuntimeError('SecKNN must execute its original scalar scan; tournament substitution is forbidden')
                 if item['bench_scheme']=='kona' and meta.get('kona_backend')!=a.kona_backend:raise RuntimeError('Wrong KONA original/batched-dcf backend')

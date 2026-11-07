@@ -166,3 +166,5 @@ The following baseline was observed after running `bash Scripts/codex-container-
 - Maintained shared defaults live in `Machines/kona-bench-config.hpp`; C++ components and the Python organizer must read them instead of duplicating threshold/chunk literals.
 - Exactly two round meanings: `theoretical_rounds` counts dependency stages without chunk expansion; `exchange_rounds` counts actual communication exchanges. `transport_actions` is a raw send/receive action count used only for checks, never a third round metric.
 - Resolve backend overrides in common argument parsing, verify effective configuration in logs, and reject unsupported combinations instead of silently ignoring them. Preserve protocol graphs, swaps, tie behavior, and current thresholds.
+
+2026-11-07确认：SecKNN保持原生串行Top-k、原生非缓存/非批量DCF比较器（包含原有重复密钥加载），以及原始频数统计和串行投票最大值；只保留独立消息同时收发的工程修改，不引入缓存、网络替换或k=1投票捷径。checkpoints必须显式传递并核对vote-order。C++对未知或不适用的参数必须在联网前拒绝；hybrid vote不接受选择比较器/阈值覆盖，启动器也不传这些无效参数。

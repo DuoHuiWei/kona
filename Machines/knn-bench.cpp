@@ -42,6 +42,7 @@
 #include "ConstantPP/sec-kc-batch.hpp"
 #include "ConstantPP/secmax-local-fss-l2.hpp"
 #include <cstring>
+#include <cctype>
 #include <set>
 #include "Machines/kona-nhss-cong-pipeline.hpp"
 
@@ -60,6 +61,17 @@ namespace kona_native {
 #undef main
 #undef KONA_STAGE_BENCH
 } // namespace kona_native
+
+// ezOptionParser otherwise silently retains unknown flags. Reject them before
+// networking, including trailing flags stored as positional arguments.
+static void reject_unknown_options(const ez::ezOptionParser& parser) {
+    for(const auto* arg:parser.unknownArgs)
+        throw std::invalid_argument("unknown option/argument: "+*arg);
+    for(const auto* list:{&parser.firstArgs,&parser.lastArgs})
+        for(const auto* arg:*list)
+            if(arg->size()>1 && (*arg)[0]=='-' && !std::isdigit(static_cast<unsigned char>((*arg)[1])))
+                throw std::invalid_argument("unknown option: "+*arg);
+}
 
 namespace constantpp_engine {
 
@@ -114,6 +126,7 @@ void parse_argv(int argc, const char** argv)
     opt.add("UNVERIFIED", 0, 1, 0, "Declared network profile; actual snapshot in log wrapper", "--network-profile");
     opt.add("paper-local-l2", 0, 1, 0, "SecMax only: paper-local-l2 (performance, NO privacy) or legacy", "--secmax-mode");
     opt.parse(argc, argv);
+    reject_unknown_options(opt);
 
     if (opt.isSet("-p"))
         opt.get("-p")->getInt(playerno);
@@ -940,6 +953,7 @@ int run(int argc,const char** argv) {
     opt.add("",0,1,0,"Vote order; permutation of checkpoints","--vote-order");
     opt.add("scalar",0,1,0,"Native serial scan only; historical layered changes the algorithm and is rejected","--topk-mode");
     parse_argv(argc,argv);
+    reject_unknown_options(opt);
     opt.get("--k")->getInt(k_const);
     string path,scope,network,topk_mode;
     opt.get("--topk-mode")->getString(topk_mode);
@@ -1060,6 +1074,7 @@ int run(int argc,const char** argv) {
         // Votes are independent measured calls, AFTER all Top-k work. Barriers,
         // candidate copies, validation and printing are outside vote timers.
         for(int k:vote_order){
+            cout<<"VOTE_EXECUTION k="<<k<<" order_source=explicit_or_checkpoint_default\n";
             const size_t i=std::find(checkpoints.begin(),checkpoints.end(),k)-checkpoints.begin();
             k_const=k;barrier();vote_begin[i]=snap();
             party.label_compute(selected[i],party.m_shared_label_list_count_array);
@@ -1334,6 +1349,7 @@ int run(int argc,const char** argv) {
     opt.add("",0,1,0,"Vote order; permutation of checkpoints","--vote-order");
     opt.add("original",0,1,0,"original or historical cached batched-dcf components","--kona-backend");
     parse_argv(argc,argv);
+    reject_unknown_options(opt);
     opt.get("--k")->getInt(k_const);
     string path,scope,network;
     opt.get("--dataset")->getString(path);opt.get("--scope")->getString(scope);
@@ -1488,6 +1504,7 @@ int run(int argc,const char** argv) {
         // Votes are independent measured calls, AFTER all Top-k work. Barriers,
         // candidate copies, validation and printing are outside vote timers.
         for(int k:vote_order){
+            cout<<"VOTE_EXECUTION k="<<k<<" order_source=explicit_or_checkpoint_default\n";
             const size_t i=std::find(checkpoints.begin(),checkpoints.end(),k)-checkpoints.begin();
             k_const=k;barrier();vote_begin[i]=snap();
             if(optimized)cached_label_counts(selected[i],party.m_shared_label_list_count_array);else party.label_compute(selected[i],party.m_shared_label_list_count_array);
@@ -1888,6 +1905,7 @@ void parse_argv(
     opt.add("random", 0, 1, 0, "random, duplicates, interleaved, concentrated", "", "--input-pattern");
     opt.add("0", 0, 1, 0, "Optional public label-domain size; vote separately timed; 0 skips", "", "--vote-labels");
     opt.parse(argc, argv);
+    reject_unknown_options(opt);
 
     if (opt.isSet("-p"))
         opt.get("-p")->getInt(playerno);
@@ -2967,6 +2985,7 @@ int run(int argc,const char** argv) {
     opt.add("0",0,1,0,"Label domain;0=infer","--vote-labels");
     opt.add("512",0,1,0,"NHSS modulus bits","--lambda");
     opt.parse(argc,argv);
+    reject_unknown_options(opt);
     int party,port,k,domain,lambda;string path,scope,profile,host;
     opt.get("-p")->getInt(party);opt.get("-pn")->getInt(port);opt.get("-k")->getInt(k);
     opt.get("--vote-labels")->getInt(domain);
@@ -3117,6 +3136,21 @@ int main(int argc,char** argv) {
             }else{args.push_back(a=="--k"?"-k":a);}
         }
         if(scheme.empty())throw runtime_error("--scheme is required; use --help");
+        // Applicability is validated once, before dispatch/networking. Merely
+        // recognizing a flag in a downstream parser does not make it meaningful.
+        for(const auto& flag:args){
+            const bool selection_option=flag=="--comparator"||flag=="--matrix-backend"||
+                flag=="--threshold"||flag=="--lan-threshold"||flag=="--wan-threshold";
+            if(selection_option&&(scheme!="hybrid"||scope=="vote"))
+                throw runtime_error(flag+" is not applicable to "+scheme+"/"+scope);
+            if((flag=="--kona-backend"&&scheme!="kona")||
+               (flag=="--topk-mode"&&scheme!="secknn")||
+               (flag=="--secmax-mode"&&scheme!="constantpp"))
+                throw runtime_error(flag+" is not applicable to "+scheme);
+            if((flag=="--vote-order"||flag=="--checkpoints"||flag=="--ks")&&
+               ((scheme=="kona"||scheme=="secknn")?scope!="checkpoints":!(scheme=="hybrid"&&scope=="shared"&&flag=="--ks")))
+                throw runtime_error(flag+" is not applicable to "+scheme+"/"+scope);
+        }
         int party=-1;for(size_t i=0;i+1<args.size();++i)if(args[i]=="-p"||args[i]=="--player")party=stoi(args[i+1]);
         if(party<0&&!args.empty()&&(args[0]=="0"||args[0]=="1"))party=stoi(args[0]);
         KonaBenchAffinity::bind_fixed_cpu(party);
