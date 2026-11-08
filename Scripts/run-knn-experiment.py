@@ -127,6 +127,7 @@ CONFIG_HEADER=ROOT/'Machines/kona-bench-config.hpp'
 DEFAULTS={k:int(v) for k,v in re.findall(r'constexpr std::size_t (\w+) = (\d+);',CONFIG_HEADER.read_text())}
 if not {'DCF_CHUNK','MUL_CHUNK','LAN_THRESHOLD','WAN_THRESHOLD'} <= DEFAULTS.keys():
     raise RuntimeError('Missing shared benchmark defaults in '+str(CONFIG_HEADER))
+MATRIX_CHUNKING_DEFAULT='on' if DEFAULTS['MATRIX_CHUNKING'] else 'off'
 KS=[1,2,3,5,20,100]
 
 # The observer runs in the existing container on CPU4, separate from P0/P1.
@@ -342,7 +343,7 @@ def command_arguments(a,item):
     if item['bench_scheme']=='constantpp':args += ['--secmax-mode',a.secmax_mode]
     if item['bench_scheme']=='shao':args += ['--vote-labels',str(a.label_domain)]
     if item['bench_scheme']=='hybrid':
-        args += ['-n',str(a.n),'-m','pruned','-r','1','--warmup','0','--vote-labels',str(a.label_domain)]
+        args += ['--chunking',a.chunking or MATRIX_CHUNKING_DEFAULT,'-n',str(a.n),'-m','pruned','-r','1','--warmup','0','--vote-labels',str(a.label_domain)]
         if item['scope']!='vote':
             args += ['--comparator',a.comparator,'--matrix-backend',a.matrix_backend,
                 '--lan-threshold',str(a.lan_threshold),'--wan-threshold',str(a.wan_threshold)]
@@ -433,10 +434,12 @@ def main():
     p.add_argument('--lan-threshold',type=int,default=DEFAULTS['LAN_THRESHOLD'],help='Hybrid LAN cutoff; default from kona-bench-config.hpp')
     p.add_argument('--wan-threshold',type=int,default=DEFAULTS['WAN_THRESHOLD'],help='Hybrid WAN cutoff; default from kona-bench-config.hpp')
     p.add_argument('--comparator',choices=['hybrid','dcf','pcr'],default='hybrid',help='Hybrid selection backend; optimized vote stays DCF')
+    p.add_argument('--chunking',choices=['on','off'],default=None,help='Hybrid only: communication chunking; default off, on uses shared 16384 limits')
     p.add_argument('--matrix-backend',choices=['auto','dcf','pcr'],default='auto',help='Hybrid matrix ranking override only')
     p.add_argument('--output',type=Path)
     p.add_argument('--dry-run',action='store_true')
     a=p.parse_args();os.chdir(ROOT)
+    if a.chunking is not None and a.scheme!='hybrid':p.error('--chunking is only applicable to hybrid')
     if (a.comparator!='hybrid' or a.matrix_backend!='auto') and (a.scheme!='hybrid' or a.scope!='full'):
         p.error('Explicit selection backend overrides currently require --scheme hybrid --scope full')
     if not (0<a.lan_threshold<=2147483647 and 0<a.wan_threshold<=2147483647):p.error('hybrid thresholds must be positive 32-bit integers')
@@ -471,7 +474,7 @@ def main():
     if a.scheme=='constantpp' and a.scope=='experiment' and a.n<2:p.error('pre-vote requires N>1')
     manifest=dict(scheme=a.scheme,scope=a.scope,dataset=a.dataset,N=a.n,features=a.features,query_count=1,
         datasets=a.dataset_specs,kona_backend=a.kona_backend if a.scheme=='kona' else 'NOT_APPLICABLE',headline_e2e_only=a.e2e_only,planned_pairs=len(jobs),schedule=jobs,cpu_affinity=[0,2],core_exclusivity='NOT_VERIFIED',warmup_trials=0,
-        secmax_mode=a.secmax_mode,topk_mode=a.topk_mode,comparator=a.comparator,matrix_backend=a.matrix_backend,chunk_limits=dict(dcf=DEFAULTS['DCF_CHUNK'],mul=DEFAULTS['MUL_CHUNK']),rounds_schema='theoretical_without_chunk_vs_actual_exchange',hybrid_thresholds=dict(lan=a.lan_threshold,wan=a.wan_threshold),shao_network='rotated-msb-all-layers',shao_vote='batched-dcf',
+        secmax_mode=a.secmax_mode,topk_mode=a.topk_mode,comparator=a.comparator,matrix_backend=a.matrix_backend,chunking=(a.chunking or MATRIX_CHUNKING_DEFAULT) if a.scheme=='hybrid' else 'on',chunk_limits=dict(dcf=DEFAULTS['DCF_CHUNK'],mul=DEFAULTS['MUL_CHUNK']) if a.scheme!='hybrid' or a.chunking=='on' else None,rounds_schema='theoretical_without_chunk_vs_actual_exchange',hybrid_thresholds=dict(lan=a.lan_threshold,wan=a.wan_threshold),shao_network='rotated-msb-all-layers',shao_vote='batched-dcf',
         monitoring=dict(enabled=a.monitor,observer_cpu=4,sample_seconds=5,network_probe_mib=64),
         phase_semantics='full=measured E2E; checkpoints/shared/distance+topk-vote=staged/composed')
     if a.dry_run:print(json.dumps(manifest,indent=2));return
@@ -588,6 +591,9 @@ for pid in matching():
                 if set(phases)!=expected(a,item):raise RuntimeError(f'{job}: missing/extra phases: {set(phases)}')
                 if meta.get('accounting_check')!='PASS' or meta.get('correctness')!='PASS':raise RuntimeError(f'{job}: accounting/correctness failed')
                 if meta.get('benchmark_scheme')!=item['bench_scheme'] or meta.get('benchmark_scope')!=item['scope']:raise RuntimeError('Wrong scheme/scope')
+                effective_chunking=(a.chunking or MATRIX_CHUNKING_DEFAULT) if item['bench_scheme']=='hybrid' else 'on'
+                if meta.get('chunking')!=effective_chunking:
+                    raise RuntimeError('Effective chunking differs from requested configuration')
                 if item['scope']=='checkpoints':
                     actual_order=[int(v) for v in re.findall(r'^VOTE_EXECUTION k=(\d+) ',paths[party].read_text(),re.M)]
                     if actual_order!=list(map(int,item['ks'].split(','))):raise RuntimeError('Vote execution order differs from manifest')

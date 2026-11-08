@@ -143,6 +143,7 @@ def main():
     parser.add_argument('--blocks',nargs='+',type=int,choices=BLOCKS,default=BLOCKS)
     parser.add_argument('--profiles',nargs='+',choices=['lan','wan'],default=['lan','wan'])
     parser.add_argument('--methods',nargs='+',choices=['FullMat','PCM'],default=['FullMat','PCM'])
+    parser.add_argument('--chunking',choices=['on','off'],default=('on' if int(re.search(r'MATRIX_CHUNKING = (\d+);',(ROOT/'Machines/kona-bench-config.hpp').read_text()).group(1)) else 'off'),help='Communication chunking; default off for matrix experiments')
     a=parser.parse_args();os.chdir(ROOT)
     if a.repeats<1:parser.error('positive repeats required')
     if any(len(x)!=len(set(x)) for x in [a.blocks,a.profiles,a.methods]):parser.error('duplicate block/profile/method')
@@ -154,11 +155,11 @@ def main():
         shift=(trial-1)%len(blocks)
         for i,b in enumerate(blocks[shift:]+blocks[:shift]):
             for profile in a.profiles:jobs.append(dict(B=b,trial=trial,profile=profile,order=','.join(METHODS if (trial+i)%2 else list(reversed(METHODS)))))
-    if a.dry_run:print(json.dumps(dict(N=32768,d=32,k=5,classes=4,pairs=len(jobs),cases=len(METHODS)*len(jobs),smoke=a.smoke,schedule=jobs,comparison_policy='fixed DCF rank/mask/vote'),indent=2));return
+    if a.dry_run:print(json.dumps(dict(chunking=a.chunking,N=32768,d=32,k=5,classes=4,pairs=len(jobs),cases=len(METHODS)*len(jobs),smoke=a.smoke,schedule=jobs,comparison_policy='fixed DCF rank/mask/vote'),indent=2));return
     lock=open('/tmp/kona-bench-experiment.lock','a+');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ');out=ROOT/'KNN-experiment-res'/('matrix-block-count-'+('smoke-' if a.smoke else '')+stamp+'-'+str(os.getpid()))
     out.mkdir();(out/'raw').mkdir();print('RESULT_DIRECTORY='+str(out),flush=True)
-    baseline=sources();manifest=dict(N=32768,d=32,k=5,classes=4,seed=20261105,smoke=a.smoke,schedule=jobs,source_sha256=baseline,
+    baseline=sources();manifest=dict(chunking=a.chunking,N=32768,d=32,k=5,classes=4,seed=20261105,smoke=a.smoke,schedule=jobs,source_sha256=baseline,
         comparison_policy=dict(FullMat='DCF',PCM='DCF',rank_mask='DCF'),methods=METHODS,vote='DCF_OPTIMIZED_MASK',cpu=[0,2],core_exclusivity='NOT_VERIFIED')
     env=dict(os.environ,KONA_NETWORK_PRIVILEGED='1');rows=[];cases=[];original=None;touched=False;failure=None;done=0;procs=[];handles=[];marker=out.name;started=time.monotonic()
     def save(): (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
@@ -213,7 +214,7 @@ print(json.dumps(dict(runtime=str(runtime),key_source=str(keys),key_sha256={f:ha
                 h=(out/'raw'/f'{label}-P{party}.log').open('w');handles.append(h)
                 args=['env',f'KONA_RUN_ID={marker}',f'KONA_BENCH_SOURCE={REMOTE}/Machines/matrix-block-count-bench.cpp',f'KONA_BENCH_BINARY={REMOTE}/{TARGET}',
                     'bash',REMOTE+'/Scripts/kona-bench-log.sh','timeout','--kill-after=5','120',REMOTE+'/'+TARGET,
-                    '-p',str(party),'-pn','36000','--blocks',str(b),'--trial',str(trial),'--network-profile',profile,'--order',job['order']]
+                    '-p',str(party),'-pn','36000','--blocks',str(b),'--trial',str(trial),'--network-profile',profile,'--order',job['order'],'--chunking',a.chunking]
                 procs.append(sp.Popen(['docker','exec','kona-dev','bash','-lc','cd '+shlex.quote(info['runtime'])+' && '+shlex.join(args)],stdout=h,stderr=sp.STDOUT))
             deadline=time.monotonic()+150;sample=0;last_monitor=time.monotonic()
             while any(p.poll() is None for p in procs):

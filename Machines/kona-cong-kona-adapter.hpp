@@ -26,7 +26,7 @@ inline void ss_vec_kona_l2(
         const std::vector<int>& compare_idx_vec,
         const std::vector<Z2<K>>& compare_res,
         RealTwoPartyPlayer* player,
-        size_t chunk_size = KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK)
+        size_t chunk_size = KonaBenchConfig::mul_chunk())
 {
     assert(compare_idx_vec.size() && compare_idx_vec.size() == compare_res.size());
     const int size_of_cur_cmp = (int)compare_idx_vec.size();

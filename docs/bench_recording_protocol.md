@@ -6,6 +6,13 @@
 - 显式 `--pacing burst` 保留历史HTB限速、netem仅延迟的v3方式。旧实验不改标、不自动重跑；新旧网络模型不能只按“40Mbps/20ms”直接混表。保存网络脚本版本、pacing、双方netem实际rate、队列及offload证据。
 - WAN小规模验证：双向同时各发送512KiB，历史模式约21ms收到全部，serialized约129ms；15000项PPC不分chunk，新模式在线三次约380.640/559.109/382.528ms。不是人为延时或拟合370ms；TCP、双方起点和执行历史仍会增加开销，kernel定时精度也不能保证任意微小时间窗口严格匀速。此验证只覆盖WAN；其余四档已做命令配置检查，尚未声称实测吞吐验证。
 - 完整逐轮及双方记录：`KNN-experiment-res/serialized-rate-validation-wan-20261108T071454Z/`。测试结束清除整形并恢复原offload。通信按已有调用墙钟计时，仍与纯线路发送时间有区别。
+- 交叉点组织器在每个整形job开始前、结束后均核对两方向HTB速率、netem实际rate/延迟和offload，并核对应用日志中的profile、pacing与版本。默认从统一网络脚本读取pacing；`--pacing burst`显式选择旧模式。serialized模式缺失rate或错配400Mbps必须失败，旧burst模式则拒绝意外存在的netem rate。检查证据写入`network-validation.json`，模式与版本写入manifest，执行顺序另存。
+- `Scripts/run-comparator-crossover.py --trace-exchanges 1`开启诊断逐轮追踪并传给C++，默认0用于正式性能计时。双方的轮序、时间戳、字节和总计闭合均检查，逐轮结果保存`exchange_trials.csv`；没有追踪记录时不能声称测过逐轮。`compare3`是在不变输入上连续比较三次，验证前一层交换结果进入后一层应显式选`--tests swap3`。
+- 热连接切换点校准显式使用`--repeats 1 --connection-samples 4 --discard-first 1`：每个宽度只建立一对持久连接，两后端轮换执行各四次，各自第一次及双方指标保留在`discarded_phase_trials.csv`，只对后面三次汇总。每方的所有样本完成计时后才进行大规模正确性揭示与打印，避免验证流量在样本之间充当不对称预热。模式、弃样数量、初始顺序与实际每次顺序均记录；第一次预热不是免费的完整KNN成本，不能把该校准口径用于替换完整混合KNN计时。完整KNN入口未改。
+- 独立交叉点bench使用`common-clock-same-kernel`共同起跑：只接受本地连接，并核对两方Linux boot ID、时间命名空间及`steady_clock`与`CLOCK_MONOTONIC`同域；P0提议未来时刻，双方确认后在计时外等待。校准专用提前量200ms、最后10ms忙等、起跑容差1ms，只在该C++bench定义，组织器读取并核对，不改共享协议配置。WSL仅用绝对睡眠可能迟到数ms，早唤醒忙等用于控制起点；迟到/偏斜超过门槛判失败，保留日志，不自动重试。
+- `start_alignment.csv`记录全部条件（含弃首）的共同deadline、双方ready/实际起止纳秒、迟到量和起跑差。`phase_trials.csv`与原始日志也保存每阶段首末时刻；汇总仍取每次双方在线总段较大值，计算/通信取同一方，不事后减掉等待。共同deadline到末方结束、实际观察跨度只作附加时序证据；该方法不假设跨物理主机共享单调时钟，也不进入完整混合KNN入口。
+- 四模式扫描按`profile/width/workload`隔离连接：每个`compare1/compare3/swap1/swap3`独立建一对连接，在自己的连接内做DCF/PPC四次弃首，避免其他模式的通信预热窗口。组织器轮换模式顺序、交替网络及后端，`--lan-widths`/`--wan-widths`显式指定各自点集，与全局`--widths`冲突或给未选网络传参数必须拒绝。
+- `compare3`连续三次比较不变输入；`swap3`三层使用不同预定配对并传递更新后的距离和标签，复用原比较器与swap。共同起跑只在整段开始，层间不插同步或新等待。无chunk时DCF/PPC理论与实际轮次依次为`compare1:1/8`、`compare3:3/24`、`swap1:2/9`、`swap3:6/27`。配对与交叉区间汇总覆盖四模式；三层总时间取双方完整总段最大值，不能累加各层各自max。
 
 2026-11-06参数与轮次修正（后续实验优先采用）：
 
@@ -442,3 +449,31 @@ Shao NHSS距离采样口径（2026-11-04用户指定）：Iris和MNIST可以仅�
 该批24/24通过，原协议模块哈希与此前KONA N扩展一致；仅统一bench中复用输入准备、补分阶段观测及组织脚本多数据集full支持。结果KNN-experiment-res/knn-hybrid-20261104T125339Z-252042/。
 
 2026-11-07确认：SecKNN保持原生串行Top-k、原生非缓存/非批量DCF比较器（包含原有重复密钥加载），以及原始频数统计和串行投票最大值；只保留独立消息同时收发的工程修改，不引入缓存、网络替换或k=1投票捷径。checkpoints必须显式传递并核对vote-order。C++对未知或不适用的参数必须在联网前拒绝；hybrid vote不接受选择比较器/阈值覆盖，启动器也不传这些无效参数。
+
+### 2026-11-08：Ours／矩阵实验的通信 chunk 开关
+
+用户确认：Ours（包括退化为单 Cong 的路径）及矩阵实验默认关闭通信 chunk。
+`knn-bench.x --scheme hybrid` 与 `Scripts/run-knn-experiment.py --scheme hybrid`
+均接受 `--chunking off|on`，默认 `off`；其他方案拒绝此覆盖，沿用原来的限额。
+`off` 表示每个逻辑批次的 DCF、PPC 的 B2A、安全 swap 和优化投票整批调用；
+不是将有依赖的网络层合并，也不是取消算法外层分块或 Cong 内部递归。
+`on` 恢复共享配置中的 DCF/MUL 限额（当前均为 16384，单位不同）。
+
+独立的矩阵 B 扫描与网络消融 bench／Python 启动器也接受同一开关、默认关闭。
+网络消融的 DQ/Merge/FullMat/PCM 使用同一开关，避免把通信分批差异混入结构对比。
+底层比较器、B2A 和乘法只增加运行期默认批次解析；未主动开启该覆盖的进程
+仍保持原有默认值。显式传入批大小的交叉点实验继续使用其显式值。
+运行期覆盖限于当前线程和作用域，不改正式全局常量及比较器阈值。
+
+日志记录 `chunking`、批次策略；KNN 入口还记录生效限额；Python manifest 保存
+开关（关闭时 chunk_limits 为 null）。理论轮次始终按依赖阶段计算，实际交换次数
+按生效批次核对。关闭 chunk 不应改变 payload 字节总数、网络结构、标签交换或
+平票规则；大批次的临时内存峰值可能增加。历史结果不改写、不重新标记。
+
+本次验证：三个 bench 在现有 `kona-dev` 编译完成；Python 语法、默认值、覆盖及
+非适用参数拒绝通过。完整 Iris、小规模退化 Cong、矩阵末端、独立 B 扫描和四结构
+消融均在 chunk 开／关两种模式通过正确性及通信核对。额外单层 m=16385 的
+比较＋距离／标签交换边界回归：DCF 实际交换 5→2，PPC 12→9；单方 payload
+分别保持 1,179,720 B、2,195,590 B，理论轮次仍分别为 2、9。
+日志：`KNN-experiment-res/chunk-policy-regression-20261108T085110Z/`。
+这些是无网络整形的功能／计数回归，不作为正式网络性能数据。

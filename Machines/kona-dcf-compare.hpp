@@ -234,7 +234,7 @@ public:
             const std::vector<int>& compare_idx_vec,
             std::vector<Z2<K>>& compare_res,
             bool greater_than,
-            size_t chunk_size = MAX_COMPARE_CHUNK)
+            size_t chunk_size = KonaBenchConfig::dcf_chunk())
     {
         assert(compare_idx_vec.size() && compare_idx_vec.size() == compare_res.size());
         const int size_res = int(compare_idx_vec.size() / 2);
@@ -303,7 +303,7 @@ public:
             const std::vector<int>& compare_idx_vec,
             std::vector<Z2<K>>& compare_res,
             bool greater_than,
-            size_t chunk_size = MAX_COMPARE_CHUNK)
+            size_t chunk_size = KonaBenchConfig::dcf_chunk())
     {
         assert(compare_idx_vec.size() && compare_idx_vec.size() == compare_res.size());
         const int size_res = int(compare_idx_vec.size() / 2);

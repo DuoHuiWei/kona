@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Five-network pure-comparison calibration; no KNN/distance/vote/swap by default.
 Default: all five network profiles interleaved, compare1/compare3 only, three independent repetitions.
+Each profile/width/workload uses its OWN connection so unrelated workloads
+cannot prewarm each other. DCF/PPC share only their matched workload connection.
 PCR/DCF order alternates by width/trial; workload order rotates in C++.
 compare3 = three sequential compare calls on unchanged inputs; swap3 = three
 preplanned disjoint-pair layers, each consuming preceding swapped records.
@@ -15,6 +17,14 @@ Only theoretical_rounds (unchunked stages) and exchange_rounds (actual exchanges
 are round metrics. Raw directional actions are accounting checks only.
 Uses existing kona-dev, existing test keys and fixed CPU0/2; no key generation.
 The five network profiles remain in container-network.sh. --smoke is unshaped.
+--pacing defaults to that script's current default; both netem rates and the
+applied profile/pacing/version must match before and after every shaped job.
+--trace-exchanges 1 enables buffered C++ exchange timestamps for diagnostics,
+checked and saved for BOTH parties in exchange_trials.csv. Default 0 keeps
+formal timing free of enabled trace observations. compare3 is NOT swap3.
+Calibration peers must share the same Linux CLOCK_MONOTONIC domain. Every
+condition has a future common start; readiness/proposal/sleep are untimed.
+Both actual start/end timestamps are saved; late/skewed starts fail, no reruns.
 Failure stops without retries; finally kills this job's processes, clears shaping
 and restores prior offload flags. Archives source/binary identity, execution
 order, network snapshots, both raw logs, phase CSV and per-party round arrays.
@@ -23,13 +33,23 @@ Old three-profile compare-only script remains available as historical evidence.
 Launch: python3 -u Scripts/run-comparator-crossover.py
 Focused widths: --widths 128 160 180 200 256
 Focused profiles: --profiles lan wan
-Legacy four workloads: --tests compare1 compare3 swap1 swap3 --profiles lan wan
+Four isolated workloads: --tests compare1 compare3 swap1 swap3 --profiles lan wan
+Per-profile points: --lan-widths 120 150 170 190 210 230 --wan-widths 1000 5000 10000 15000 16000 17000 18000 19000 20000
+Diagnostic traces: --profiles wan --tests compare1 swap3 --trace-exchanges 1
+Warm connection: --profiles wan --tests compare1 --repeats 1 --connection-samples 4 --discard-first 1
 Small regression (after active experiments finish): --smoke --widths 3 8193 16385 --repeats 1
 """
 import argparse,csv,datetime,fcntl,hashlib,json,os,re,shlex,signal,statistics,subprocess as sp,time,uuid
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];REMOTE='/usr/src/Garnet';TARGET='kona-comparator-crossover-bench.x'
-NETWORK_CONFIG={name:dict(rate=rate,delay=delay) for name,rate,delay in re.findall(r'([a-z-]+)\) PARENT_RATE=\S+; RATE=(\S+); DELAY=([^ ;]+)',(ROOT/'Scripts/container-network.sh').read_text())}
+NETWORK_SCRIPT=ROOT/'Scripts/container-network.sh'
+NETWORK_SOURCE=NETWORK_SCRIPT.read_text()
+BENCH_SOURCE=(ROOT/'Machines/kona-comparator-crossover-bench.cpp').read_text()
+COMMON_START_LEAD_MS=int(re.search(r'COMMON_START_LEAD_MS=(\d+)',BENCH_SOURCE).group(1))
+COMMON_START_TOLERANCE_US=int(re.search(r'COMMON_START_TOLERANCE_US=(\d+)',BENCH_SOURCE).group(1))
+COMMON_START_SPIN_US=int(re.search(r'COMMON_START_SPIN_US=(\d+)',BENCH_SOURCE).group(1))
+DEFAULT_PACING=re.search(r'^PACING=([a-z]+)$',NETWORK_SOURCE,re.M).group(1)
+NETWORK_CONFIG={name:dict(rate=rate,delay=delay) for name,rate,delay in re.findall(r'([a-z-]+)\) PARENT_RATE=\S+; RATE=(\S+); DELAY=([^ ;]+)',NETWORK_SOURCE)}
 WIDTHS={'lan':[32,64,128,160,180,200,256,512,1024],
         'wan':[6000,10000,14000,16000],
         'super-dc':[4,8,16,32,64,128,256],
@@ -52,20 +72,23 @@ def summarize(out,rows):
    r['mean_'+metric]=statistics.mean(x[metric] for x in group)
    r['sd_'+metric]=statistics.stdev(x[metric] for x in group) if len(group)>1 else None
   calls=3 if key[2].endswith('3') else 1
+  r['layers']=calls;r['operation']='compare+swap' if key[2].startswith('swap') else 'compare-only'
   r['mean_us_per_compare']=mean*1000/(key[1]*calls)
   r['compute_us_per_compare']=r['mean_compute_ms']*1000/(key[1]*calls)
   r['communication_us_per_compare']=r['mean_communication_ms']*1000/(key[1]*calls)
+  r['max_start_skew_us']=max(x['start_skew_ns'] for x in group)/1000
+  r['max_start_lateness_us']=max(max(x['P0_start_lateness_ns'],x['P1_start_lateness_ns']) for x in group)/1000
   for party in [0,1]:
    for metric in ['theoretical_rounds','exchange_rounds']:r[f'P{party}_{metric}_trials']=json.dumps([x[f'P{party}_{metric}'] for x in group])
   summary.append(r)
  csv_write(out/'summary.csv',summary)
- # Pair only comparison workloads; report measured brackets, never modify tau
+ # Pair all selected workloads, including compare+swap; never modify tau
  # or extrapolate a universal threshold from an unbracketed grid.
  pairs=[]
- for profile,width,test in sorted({(r['profile'],r['width'],r['test']) for r in summary if r['test'].startswith('compare')}):
+ for profile,width,test in sorted({(r['profile'],r['width'],r['test']) for r in summary}):
   by={r['backend']:r for r in summary if (r['profile'],r['width'],r['test'])==(profile,width,test)}
   if set(by)!={'dcf','pcr'}:continue
-  calls=3 if test=='compare3' else 1
+  calls=3 if test.endswith('3') else 1
   r=dict(profile=profile,width=width,test=test,calls=calls,samples=by['dcf']['samples'])
   for backend in ['dcf','pcr']:
    for metric in ['mean_ms','median_ms','sd_ms','cv']:r[backend+'_'+metric]=by[backend][metric]
@@ -89,8 +112,24 @@ def summarize(out,rows):
  lines=['# Comparator crossover calibration','','Time/bytes: max(P0,P1) per trial. Round arrays retain P0/P1 separately.','Theoretical rounds exclude chunks; actual rounds are exchange_rounds. Compare/swap layer details are in phase_trials.csv.','','| Profile | Width | Test | Backend | Trials | Total mean ms | Local mean ms | Communication mean ms | Median ms | SD ms | Bytes/party | Theory P0/P1 | Actual P0/P1 |','|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|']
  for r in summary:lines.append('| '+' | '.join(str(r[k]) for k in ['profile','width','test','backend','samples','mean_ms','mean_compute_ms','mean_communication_ms','median_ms','sd_ms','mean_sent_bytes'])+' | '+r['P0_theoretical_rounds_trials']+'/'+r['P1_theoretical_rounds_trials']+' | '+r['P0_exchange_rounds_trials']+'/'+r['P1_exchange_rounds_trials']+' |')
  (out/'summary.md').write_text('\n'.join(lines)+'\n')
-def check_network(text,profile):
+def profile_metadata(text):
+ lines=[line for line in text.splitlines() if line.startswith('NETWORK_PROFILE ')]
+ if len(lines)!=1:raise RuntimeError('Missing/ambiguous NETWORK_PROFILE evidence')
+ return dict(item.split('=',1) for item in lines[0].split()[1:])
+def network_contract(profile,pacing):
+ # Read the exact mode/version from the single shell source of truth, no
+ # duplicate v3/v4 version literals in this organizer. Dry-run never uses Docker.
+ output=sp.check_output(['bash',str(NETWORK_SCRIPT),profile,'lo','--pacing',pacing,'--dry-run'],text=True)
+ contract=profile_metadata(output)
+ if contract.get('pacing')!=pacing or contract.get('profile')!=profile or contract.get('action')!='apply' or not contract.get('version'):
+  raise RuntimeError('Invalid network source-of-truth contract')
+ return contract
+def check_network(text,profile,pacing=DEFAULT_PACING,profile_log='',contract=None):
  config=NETWORK_CONFIG[profile]
+ expected=contract if contract is not None else network_contract(profile,pacing)
+ metadata=profile_metadata(profile_log)
+ for key in ['version','pacing','action','profile','container','dev','rate_per_direction','one_way_delay','parent_rate']:
+  if metadata.get(key)!=expected.get(key):raise RuntimeError('Network profile metadata mismatch: '+key)
  def rate(value):
   m=re.fullmatch(r'([0-9.]+)([kmg]?)bit',value.lower())
   if not m:raise RuntimeError('Unrecognized rate '+value)
@@ -102,43 +141,145 @@ def check_network(text,profile):
  for lane in ['10','20']:
   match=re.search(r'^class htb 1:'+lane+r' .*?rate (\S+)',text,re.M)
   if not match or rate(match[1])!=rate(config['rate']):raise RuntimeError('Lane rate mismatch')
-  match=re.search(r'^qdisc netem '+lane+r':.*?delay (\S+)',text,re.M)
+  lines=re.findall(r'^qdisc netem '+lane+r':[^\n]*',text,re.M)
+  if len(lines)!=1:raise RuntimeError('Missing/ambiguous netem lane '+lane)
+  match=re.search(r'\bdelay (\S+)',lines[0])
   if not match or abs(delay(match[1])-delay(config['delay']))>2:raise RuntimeError('Lane delay mismatch')
+  match=re.search(r'\brate (\S+)',lines[0])
+  if pacing=='serialized':
+   if not match or rate(match[1])!=rate(config['rate']):raise RuntimeError('Netem lane '+lane+' rate mismatch/missing')
+  elif pacing=='burst':
+   if match:raise RuntimeError('Unexpected netem rate in historical burst mode')
+  else:raise RuntimeError('Unsupported network pacing')
  for feature in ['tcp-segmentation-offload','generic-segmentation-offload','generic-receive-offload']:
   if not re.search(r'^'+feature+r': off',text,re.M):raise RuntimeError('Offload configuration mismatch')
+ return dict(profile=profile,pacing=pacing,version=metadata['version'],netem_rate=config['rate'] if pacing=='serialized' else None)
+def exchange_trace_rows(text,phase,job,party,enabled):
+ traces={}
+ for line in text.splitlines():
+  if line.startswith('EXCHANGE_TRACE '):
+   r=dict(item.split('=',1) for item in line.split()[1:])
+   key=(r['test'],r['backend'])
+   if int(r['party'])!=party:raise RuntimeError('Trace party mismatch')
+   traces.setdefault(key,[]).append(r)
+ totals={(t,b):r for (t,b,ph,layer),r in phase.items() if ph=='total'}
+ if not enabled:
+  if traces:raise RuntimeError('Unexpected exchange tracing in untraced run')
+  return []
+ if set(traces)!=set(totals):raise RuntimeError('Missing/unexpected trace workloads')
+ rows=[]
+ for (test,backend),total in totals.items():
+  expected=[]
+  for layer in range(3 if test.endswith('3') else 1):
+   for i,mult in enumerate([8] if backend=='dcf' else [16,16,8,4,4,4,2,16]):
+    expected.append((layer,'compare',i+1,job['width']*mult))
+   if test.startswith('swap'):expected.append((layer,'swap',1,64*job['width']))
+  group=traces[test,backend]
+  if len(group)!=len(expected) or len(group)!=int(total['exchange_rounds']):raise RuntimeError('Trace exchange count mismatch')
+  previous_end=None;elapsed=0;sent=0
+  for index,(r,(layer,operation,operation_round,expected_bytes)) in enumerate(zip(group,expected),1):
+   begin,end=int(r['begin_steady_ns']),int(r['end_steady_ns'])
+   milliseconds=float(r['communication_ms']);payload=int(r['sent_bytes'])
+   if int(r['round'])!=index or payload!=expected_bytes or end<begin or (previous_end is not None and begin<previous_end):
+    raise RuntimeError('Invalid trace order/timestamps/payload')
+   if not (abs(milliseconds-(end-begin)/1e6)<=1e-5):raise RuntimeError('Trace timer mismatch')
+   previous_end=end;elapsed+=milliseconds;sent+=payload
+   rows.append(dict(job,party=party,test=test,backend=backend,round=index,layer=layer,operation=operation,operation_round=operation_round,sent_bytes=payload,begin_steady_ns=begin,end_steady_ns=end,communication_ms=milliseconds))
+  if sent!=int(total['sent_bytes']) or abs(elapsed-float(total['communication_ms']))>0.2:
+   raise RuntimeError('Trace/phase bytes or communication timer closure failed')
+ return rows
+def validate_common_timing(record):
+ begin,end=int(record['online_start_steady_ns']),int(record['online_end_steady_ns'])
+ if end<begin or abs((end-begin)/1e6-float(record['online_ms']))>1e-5:
+  raise RuntimeError('Online timestamp/duration mismatch')
+ if record.get('start_timing')!='PASS':raise RuntimeError('Common start failed')
+ if record['phase']=='total':
+  deadline,ready=int(record['scheduled_start_ns']),int(record['ready_ns'])
+  lateness=int(record['start_lateness_ns'])
+  if deadline<=0 or ready>=deadline or begin-deadline!=lateness or not 0<=lateness<=COMMON_START_TOLERANCE_US*1000:
+   raise RuntimeError('Common start readiness/lateness mismatch')
+def save_start_alignment(out,rows,discarded):
+ totals=[r for r in discarded+rows if r['phase']=='total']
+ fields=['profile','width','trial','test','backend','discarded','order','clock_domain',
+         'P0_scheduled_start_ns','P1_scheduled_start_ns','P0_ready_ns','P1_ready_ns',
+         'P0_online_start_steady_ns','P1_online_start_steady_ns',
+         'P0_online_end_steady_ns','P1_online_end_steady_ns',
+         'P0_start_lateness_ns','P1_start_lateness_ns','start_skew_ns',
+         'online_ms','observed_span_ms','scheduled_to_last_finish_ms']
+ csv_write(out/'start_alignment.csv',[{k:r[k] for k in fields} for r in totals])
+def split_connection_samples(text,job,samples,discard_first):
+ """Validate the persistent-connection schedule, including discarded evidence."""
+ lines=text.splitlines();header=[];blocks=[];current=None
+ for line in lines:
+  if line.startswith('ITERATION_BEGIN '):
+   if current is not None:raise RuntimeError('Nested connection sample')
+   meta=dict(item.split('=',1) for item in line.split()[1:]);current=dict(meta=meta,lines=[])
+  elif line.startswith('ITERATION_END '):
+   if current is None or int(line.split('=',1)[1])!=int(current['meta']['trial']):raise RuntimeError('Invalid connection sample end')
+   blocks.append(current);current=None
+  elif current is not None:current['lines'].append(line)
+  else:
+   if line.startswith(('CROSSOVER ','CHECK ','EXCHANGE_TRACE ')):raise RuntimeError('Unframed connection results')
+   header.append(line)
+ if current is not None or len(blocks)!=samples:raise RuntimeError('Missing connection samples')
+ metadata=dict(re.findall(r'^(\w+)=([^\n]+)$','\n'.join(header),re.M))
+ if metadata.get('connection_repeats')!=str(samples) or metadata.get('discard_first')!=str(discard_first) or metadata.get('verification_timing')!='after_all_connection_samples':
+  raise RuntimeError('Incorrect connection/validation configuration')
+ result=[]
+ for index,block in enumerate(blocks):
+  expected_trial=job['trial']+index;discarded=int(index<discard_first)
+  order=job['order'] if index%2==0 else ','.join(reversed(job['order'].split(',')))
+  if block['meta']!={'trial':str(expected_trial),'discarded':str(discarded),'order':order}:raise RuntimeError('Connection sample order/warmup mismatch')
+  result.append(dict(job=dict(job,trial=expected_trial,connection_first_trial=job['trial'],order=order,discarded=discarded),text='\n'.join(header+block['lines'])))
+ return result
 def main():
  p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
  p.add_argument('--profiles',nargs='+',choices=list(WIDTHS),default=['super-dc','lan','mid-lan','mid-wan','wan']);p.add_argument('--widths',nargs='+',type=int)
+ p.add_argument('--lan-widths',nargs='+',type=int,help='LAN-only point override; exclusive with --widths')
+ p.add_argument('--wan-widths',nargs='+',type=int,help='WAN-only point override; exclusive with --widths')
  p.add_argument('--tests',nargs='+',choices=['compare1','compare3','swap1','swap3'],default=['compare1','compare3'])
+ p.add_argument('--trace-exchanges',type=int,choices=[0,1],default=0,help='Diagnostic exchange trace (default off); saved for both parties')
+ p.add_argument('--pacing',choices=['serialized','burst'],default=DEFAULT_PACING,help='Network model; default from container-network.sh')
+ p.add_argument('--connection-samples',type=int,default=1,help='Samples/backend on each persistent connection, including discarded first')
+ p.add_argument('--discard-first',type=int,choices=[0,1],default=0,help='Retain but exclude the first sample/backend on each connection')
  p.add_argument('--repeats',type=int,default=3);p.add_argument('--timeout',type=int,default=120);p.add_argument('--smoke',action='store_true');p.add_argument('--dry-run',action='store_true');p.add_argument('--output',type=Path)
  a=p.parse_args();os.chdir(ROOT)
  if len(set(a.tests))!=len(a.tests):p.error('duplicate workloads')
- if a.repeats<1 or a.timeout<1 or (a.widths and any(w<1 or w>1000000 for w in a.widths)):p.error('invalid repeats/widths/timeout')
- if len(set(a.profiles))!=len(a.profiles) or (a.widths and len(set(a.widths))!=len(a.widths)):p.error('duplicate profiles/widths')
+ if not 1<=a.connection_samples<=16 or a.discard_first>=a.connection_samples:p.error('invalid connection samples/discard-first')
+ if a.repeats<1 or a.timeout<1:p.error('invalid repeats/timeout')
+ if len(set(a.profiles))!=len(a.profiles):p.error('duplicate profiles')
+ for points in [a.widths,a.lan_widths,a.wan_widths]:
+  if points and (any(w<1 or w>1000000 for w in points) or len(set(points))!=len(points)):p.error('invalid/duplicate widths')
+ if a.widths and (a.lan_widths or a.wan_widths):p.error('--widths conflicts with per-profile points')
+ if a.lan_widths and ('lan' not in a.profiles or a.smoke):p.error('--lan-widths requires an active shaped LAN profile')
+ if a.wan_widths and ('wan' not in a.profiles or a.smoke):p.error('--wan-widths requires an active shaped WAN profile')
  if a.smoke and not a.widths:p.error('--smoke requires explicit small --widths')
  profiles=['native'] if a.smoke else a.profiles
+ widths_by_profile={profile:(a.widths if a.smoke else (a.lan_widths if profile=='lan' and a.lan_widths else a.wan_widths if profile=='wan' and a.wan_widths else a.widths or WIDTHS[profile])) for profile in profiles}
  jobs=[]
  for trial in range(1,a.repeats+1):
-  count=max(len(a.widths or WIDTHS[profile]) for profile in profiles) if not a.smoke else len(a.widths)
-  for i in range(count):
-   for profile in profiles:
-    widths=a.widths or WIDTHS[profile]
-    if i<len(widths):
-     # Width execution rotates, but backend order uses the ORIGINAL width index.
-     # Using i here would cancel alternation for fixed widths on even grids.
-     fixed_index=(i+trial-1)%len(widths)
-     jobs.append(dict(trial=trial,profile=profile,width=widths[fixed_index],fixed_width_index=fixed_index,
-         order='dcf,pcr' if (fixed_index+trial)%2 else 'pcr,dcf'))
- for profile in profiles:
-  for width in {j['width'] for j in jobs if j['profile']==profile}:
-   sequence=[j['order'] for j in jobs if j['profile']==profile and j['width']==width]
-   if any(x==y for x,y in zip(sequence,sequence[1:])):raise RuntimeError('Backend order did not alternate')
+  for i in range(max(len(points) for points in widths_by_profile.values())):
+   # Rotate workload execution positions, but backend order depends on fixed
+   # width/workload indices, not rotated positions. Profiles remain interleaved.
+   for test_position in range(len(a.tests)):
+    test_index=(test_position+i+trial-1)%len(a.tests)
+    for profile in profiles:
+     widths=widths_by_profile[profile]
+     if i<len(widths):
+      fixed_index=(i+trial-1)%len(widths)
+      jobs.append(dict(trial=(trial-1)*a.connection_samples+1,profile=profile,width=widths[fixed_index],fixed_width_index=fixed_index,
+          workload=a.tests[test_index],fixed_workload_index=test_index,
+          order='dcf,pcr' if (fixed_index+test_index+trial)%2 else 'pcr,dcf',pacing='unshaped' if a.smoke else a.pacing,trace_exchanges=a.trace_exchanges,connection_samples=a.connection_samples,discard_first=a.discard_first))
+ for profile,width,test in {(j['profile'],j['width'],j['workload']) for j in jobs}:
+  sequence=[j['order'] for j in jobs if (j['profile'],j['width'],j['workload'])==(profile,width,test)]
+  if any(x==y for x,y in zip(sequence,sequence[1:])):raise RuntimeError('Backend order did not alternate')
  if a.dry_run:print(json.dumps(jobs,indent=2));return
  lock=open('/tmp/kona-bench-experiment.lock','a+');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
  out=(a.output or ROOT/'KNN-experiment-res'/('comparator-crossover-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))).resolve();out.mkdir(exist_ok=False);(out/'raw').mkdir();print('RESULT_DIRECTORY='+str(out),flush=True)
  for sig in [signal.SIGINT,signal.SIGTERM]:signal.signal(sig,lambda s,f:(_ for _ in ()).throw(KeyboardInterrupt(str(s))))
- baseline=hashes();env=dict(os.environ,KONA_NETWORK_PRIVILEGED='1');original=None;touched=False;active=None;procs=[];rows=[];completed=0;failure=None;runtime='/tmp/crossover-'+uuid.uuid4().hex
- manifest=dict(timing_split='same critical party: online=communication-call-wall+local-wall-residual',tests=a.tests,swap_enabled=any(t.startswith('swap') for t in a.tests),jobs=jobs,source_sha256=baseline,cpu_affinity=[0,2],core_exclusivity='NOT_VERIFIED',smoke=a.smoke,chunking='disabled_for_this_benchmark',batch_items='DCF=m; PPC B2A=m; swap selectors=2m',configuration_source='Machines/kona-bench-config.hpp and Scripts/container-network.sh',network_profiles=NETWORK_CONFIG)
+ baseline=hashes();env=dict(os.environ,KONA_NETWORK_PRIVILEGED='1');original=None;touched=False;active=None;procs=[];rows=[];discarded_rows=[];exchange_rows=[];network_checks=[];completed=0;failure=None;runtime='/tmp/crossover-'+uuid.uuid4().hex
+ contracts={} if a.smoke else {profile:network_contract(profile,a.pacing) for profile in profiles}
+ manifest=dict(workload_isolation='fresh_connection_per_profile_width_workload',widths_by_profile=widths_by_profile,start_mode='common-clock-same-kernel',common_start_lead_ms=COMMON_START_LEAD_MS,start_tolerance_us=COMMON_START_TOLERANCE_US,common_start_spin_us=COMMON_START_SPIN_US,connection_samples=a.connection_samples,discard_first=a.discard_first,verification_timing='after_all_connection_samples',timing_split='same critical party: online=communication-call-wall+local-wall-residual',tests=a.tests,swap_enabled=any(t.startswith('swap') for t in a.tests),jobs=jobs,source_sha256=baseline,cpu_affinity=[0,2],core_exclusivity='NOT_VERIFIED',smoke=a.smoke,trace_exchanges=bool(a.trace_exchanges),network_pacing='unshaped' if a.smoke else a.pacing,network_contracts=contracts,chunking='disabled_for_this_benchmark',batch_items='DCF=m; PPC B2A=m; swap selectors=2m',configuration_source='Machines/kona-bench-config.hpp and Scripts/container-network.sh',network_profiles=NETWORK_CONFIG)
  try:
   with (out/'build.log').open('w') as f:
    sp.run(['bash','Scripts/codex-container-build.sh'],stdout=f,stderr=sp.STDOUT,check=True)
@@ -156,71 +297,92 @@ print(json.dumps(dict(offload=flags,key_source=str(k),binary_sha256=hashlib.sha2
   info=json.loads(docker('python3','-c',setup,runtime,REMOTE+'/'+TARGET));original=info['offload'];manifest.update(info);(out/'manifest.json').write_text(json.dumps(manifest,indent=2))
   for seq,job in enumerate(jobs,1):
    if hashes()!=baseline:raise RuntimeError('Source changed during batch')
-   profile=job['profile'];label=f"t{job['trial']}-m{job['width']}-{profile}";active=out.name+'/'+label
+   profile=job['profile'];job_tests=[job['workload']];label=f"t{job['trial']}-m{job['width']}-{profile}-{job['workload']}";active=out.name+'/'+label
    print(f'START {seq}/{len(jobs)} {label}',flush=True)
    with (out/'order.jsonl').open('a') as f:f.write(json.dumps(dict(job,sequence=seq,status='STARTED'))+'\n')
    if not a.smoke:
     touched=True
-    with (out/(label+'-network.log')).open('w') as f:sp.run(['bash','Scripts/container-network.sh',profile,'lo'],env=env,stdout=f,stderr=sp.STDOUT,check=True)
+    with (out/(label+'-network.log')).open('w') as f:sp.run(['bash','Scripts/container-network.sh',profile,'lo','--pacing',a.pacing],env=env,stdout=f,stderr=sp.STDOUT,check=True)
    network_text=docker('bash','-lc','tc -s qdisc show dev lo; tc -s class show dev lo; ethtool -k lo')
    (out/(label+'-before.log')).write_text(network_text)
-   if not a.smoke:check_network(network_text,profile)
+   if not a.smoke:
+    network_checks.append(dict(label=label,boundary='before',**check_network(network_text,profile,a.pacing,(out/(label+'-network.log')).read_text(),contracts[profile])))
+    (out/'network-validation.json').write_text(json.dumps(network_checks,indent=2))
    current=docker('sha256sum',REMOTE+'/'+TARGET).split()[0]
    if current!=info['binary_sha256']:raise RuntimeError('Binary changed')
    handles=[];procs=[]
    try:
     for party in [0,1]:
      f=(out/'raw'/f'{label}-P{party}.log').open('w');handles.append(f)
-     args=['env','KONA_RUN_ID='+active,'timeout','--kill-after=5',str(a.timeout),REMOTE+'/'+TARGET,'-p',str(party),'-pn','39000','--width',str(job['width']),'--trial',str(job['trial']),'--profile',profile,'--order',job['order'],'--tests',','.join(a.tests)]
+     args=['env','KONA_RUN_ID='+active,'timeout','--kill-after=5',str(a.timeout),REMOTE+'/'+TARGET,'-p',str(party),'-pn','39000','--width',str(job['width']),'--trial',str(job['trial']),'--profile',profile,'--order',job['order'],'--tests',','.join(job_tests),'--trace-exchanges',str(a.trace_exchanges),'--connection-repeats',str(a.connection_samples),'--discard-first',str(a.discard_first)]
      procs.append(sp.Popen(['docker','exec','kona-dev','bash','-lc','cd '+shlex.quote(runtime)+' && '+shlex.join(args)],stdout=f,stderr=sp.STDOUT))
     exits=[proc.wait(timeout=a.timeout+10) for proc in procs]
     if any(exits):raise RuntimeError(f'{label} failed {exits}; no retry')
    finally:
     for f in handles:f.close()
-   parsed=[]
-   for party in [0,1]:
-    text=(out/'raw'/f'{label}-P{party}.log').read_text();checks=[l for l in text.splitlines() if l.startswith('CHECK ')]
-    meta=dict(re.findall(r'^(\w+)=([^\n]+)$',text,re.M))
-    if meta.get('chunking')!='disabled_for_this_benchmark' or any(int(meta.get(key,-1))!=value for key,value in [('dcf_batch_items',job['width']),('ppc_b2a_batch_items',job['width']),('swap_selector_batch_items',2*job['width'])]):raise RuntimeError('Wrong benchmark-only batch sizes')
-    if len(checks)!=2*len(a.tests) or any('correctness=PASS accounting=PASS' not in l for l in checks):raise RuntimeError('Missing validation')
-    phase={}
-    for line in text.splitlines():
-     if line.startswith('CROSSOVER '):
-      r=dict(x.split('=',1) for x in line.split()[1:]);key=(r['test'],r['backend'],r['phase'],int(r['layer']))
-      if key in phase or int(r['transport_actions'])!=2*int(r['exchange_rounds']):raise RuntimeError('Invalid phase counters')
-      if r['profile']!=profile or int(r['width'])!=job['width'] or int(r['trial'])!=job['trial']:raise RuntimeError('Wrong parameters')
-      if int(r['theoretical_rounds'])!=int(r['exchange_rounds']):raise RuntimeError('Unexpected chunking/round count')
-      phase[key]=r
-    if f'BENCH_AFFINITY party={party} cpu={0 if party==0 else 2}' not in text:raise RuntimeError('Missing affinity')
-    if meta.get('selected_tests')!=','.join(a.tests) or meta.get('swap_enabled')!=str(int(any(t.startswith('swap') for t in a.tests))):raise RuntimeError('Wrong workload selection')
-    for test in a.tests:
-     for backend in ['dcf','pcr']:
-      total=phase[test,backend,'total',-1]
-      expected_rounds=(3 if test.endswith('3') else 1)*((1 if backend=='dcf' else 8)+(1 if test.startswith('swap') else 0))
-      if int(total['theoretical_rounds'])!=expected_rounds:raise RuntimeError('Wrong workload theoretical rounds')
-      parts=[r for (t,b,ph,l),r in phase.items() if t==test and b==backend and ph!='total']
-      for metric in ['sent_bytes','theoretical_rounds','exchange_rounds']:
-       if sum(int(r[metric]) for r in parts)!=int(total[metric]):raise RuntimeError('Phase counter closure failed')
-      if abs(sum(float(r['online_ms']) for r in parts)-float(total['online_ms']))>1e-5:raise RuntimeError('Timer closure failed')
-      for metric in ['communication_ms','compute_ms']:
-       if abs(sum(float(r[metric]) for r in parts)-float(total[metric]))>1e-5:raise RuntimeError('Split timer closure failed')
-      for r in [*parts,total]:
-       if abs(float(r['compute_ms'])+float(r['communication_ms'])-float(r['online_ms']))>1e-5:raise RuntimeError('Compute/communication sum failed')
-    parsed.append(phase)
-   if set(parsed[0])!=set(parsed[1]):raise RuntimeError('Party phase mismatch')
-   for key in parsed[0]:
-    r=dict(job,test=key[0],backend=key[1],phase=key[2],layer=key[3],correctness='PASS',accounting='PASS')
+   job_exchanges=[]
+   sample_blocks=[split_connection_samples((out/'raw'/f'{label}-P{party}.log').read_text(),job,a.connection_samples,a.discard_first) for party in [0,1]]
+   for sample_index in range(a.connection_samples):
+    parsed=[];clock_domains=[]
     for party in [0,1]:
-     for metric in ['online_ms','compute_ms','communication_ms','sent_bytes','theoretical_rounds','exchange_rounds']:
-      r[f'P{party}_{metric}']=float(parsed[party][key][metric]) if metric.endswith('_ms') else int(parsed[party][key][metric])
-    for metric in ['sent_bytes','theoretical_rounds','exchange_rounds']:
-     if r['P0_'+metric]!=r['P1_'+metric]:raise RuntimeError('Party accounting mismatch')
-    critical=0 if r['P0_online_ms']>=r['P1_online_ms'] else 1
-    r.update(critical_party=critical,online_ms=r[f'P{critical}_online_ms'],compute_ms=r[f'P{critical}_compute_ms'],communication_ms=r[f'P{critical}_communication_ms'],sent_bytes=max(r['P0_sent_bytes'],r['P1_sent_bytes']))
-    rows.append(r)
+     sample=sample_blocks[party][sample_index];sample_job=sample['job'];text=sample['text'];checks=[l for l in text.splitlines() if l.startswith('CHECK ')]
+     meta=dict(re.findall(r'^(\w+)=([^\n]+)$',text,re.M))
+     if meta.get('start_mode')!='common-clock-same-kernel' or int(meta.get('common_start_lead_ms',-1))!=COMMON_START_LEAD_MS or int(meta.get('start_tolerance_us',-1))!=COMMON_START_TOLERANCE_US or int(meta.get('common_start_spin_us',-1))!=COMMON_START_SPIN_US or not meta.get('clock_domain'):
+      raise RuntimeError('Missing/mismatched common-clock timing metadata')
+     clock_domains.append(meta['clock_domain'])
+     if meta.get('chunking')!='disabled_for_this_benchmark' or any(int(meta.get(key,-1))!=value for key,value in [('dcf_batch_items',job['width']),('ppc_b2a_batch_items',job['width']),('swap_selector_batch_items',2*job['width'])]):raise RuntimeError('Wrong benchmark-only batch sizes')
+     if len(checks)!=2*len(job_tests) or any('correctness=PASS accounting=PASS' not in l for l in checks):raise RuntimeError('Missing validation')
+     phase={}
+     for line in text.splitlines():
+      if line.startswith('CROSSOVER '):
+       r=dict(x.split('=',1) for x in line.split()[1:]);key=(r['test'],r['backend'],r['phase'],int(r['layer']))
+       if key in phase or int(r['transport_actions'])!=2*int(r['exchange_rounds']):raise RuntimeError('Invalid phase counters')
+       if r['profile']!=profile or int(r['width'])!=job['width'] or int(r['trial'])!=sample_job['trial']:raise RuntimeError('Wrong parameters')
+       if int(r['theoretical_rounds'])!=int(r['exchange_rounds']):raise RuntimeError('Unexpected chunking/round count')
+       validate_common_timing(r)
+       phase[key]=r
+     if f'BENCH_AFFINITY party={party} cpu={0 if party==0 else 2}' not in text:raise RuntimeError('Missing affinity')
+     if meta.get('selected_tests')!=','.join(job_tests) or meta.get('swap_enabled')!=str(int(any(t.startswith('swap') for t in job_tests))):raise RuntimeError('Wrong workload selection')
+     for test in job_tests:
+      for backend in ['dcf','pcr']:
+       total=phase[test,backend,'total',-1]
+       expected_rounds=(3 if test.endswith('3') else 1)*((1 if backend=='dcf' else 8)+(1 if test.startswith('swap') else 0))
+       if int(total['theoretical_rounds'])!=expected_rounds:raise RuntimeError('Wrong workload theoretical rounds')
+       parts=[r for (t,b,ph,l),r in phase.items() if t==test and b==backend and ph!='total']
+       for metric in ['sent_bytes','theoretical_rounds','exchange_rounds']:
+        if sum(int(r[metric]) for r in parts)!=int(total[metric]):raise RuntimeError('Phase counter closure failed')
+       if abs(sum(float(r['online_ms']) for r in parts)-float(total['online_ms']))>1e-5:raise RuntimeError('Timer closure failed')
+       for metric in ['communication_ms','compute_ms']:
+        if abs(sum(float(r[metric]) for r in parts)-float(total[metric]))>1e-5:raise RuntimeError('Split timer closure failed')
+       for r in [*parts,total]:
+        if abs(float(r['compute_ms'])+float(r['communication_ms'])-float(r['online_ms']))>1e-5:raise RuntimeError('Compute/communication sum failed')
+     job_exchanges.extend(exchange_trace_rows(text,phase,sample_job,party,bool(a.trace_exchanges)))
+     parsed.append(phase)
+    if set(parsed[0])!=set(parsed[1]):raise RuntimeError('Party phase mismatch')
+    if len(set(clock_domains))!=1:raise RuntimeError('Peers do not share clock domain')
+    for key in parsed[0]:
+     r=dict(sample_job,test=key[0],backend=key[1],phase=key[2],layer=key[3],correctness='PASS',accounting='PASS',clock_domain=clock_domains[0])
+     for party in [0,1]:
+      for metric in ['online_ms','compute_ms','communication_ms','sent_bytes','theoretical_rounds','exchange_rounds','online_start_steady_ns','online_end_steady_ns','scheduled_start_ns','ready_ns','start_lateness_ns']:
+       r[f'P{party}_{metric}']=float(parsed[party][key][metric]) if metric.endswith('_ms') else int(parsed[party][key][metric])
+     for metric in ['sent_bytes','theoretical_rounds','exchange_rounds']:
+      if r['P0_'+metric]!=r['P1_'+metric]:raise RuntimeError('Party accounting mismatch')
+     r['start_skew_ns']=abs(r['P0_online_start_steady_ns']-r['P1_online_start_steady_ns'])
+     r['observed_span_ms']=(max(r['P0_online_end_steady_ns'],r['P1_online_end_steady_ns'])-min(r['P0_online_start_steady_ns'],r['P1_online_start_steady_ns']))/1e6
+     r['scheduled_to_last_finish_ms']=(max(r['P0_online_end_steady_ns'],r['P1_online_end_steady_ns'])-r['P0_scheduled_start_ns'])/1e6
+     if r['P0_scheduled_start_ns']!=r['P1_scheduled_start_ns']:raise RuntimeError('Different proposed common start')
+     if key[2]=='total' and r['start_skew_ns']>COMMON_START_TOLERANCE_US*1000:raise RuntimeError('Common start skew exceeds tolerance')
+     critical=0 if r['P0_online_ms']>=r['P1_online_ms'] else 1
+     r.update(critical_party=critical,online_ms=r[f'P{critical}_online_ms'],compute_ms=r[f'P{critical}_compute_ms'],communication_ms=r[f'P{critical}_communication_ms'],sent_bytes=max(r['P0_sent_bytes'],r['P1_sent_bytes']))
+     (discarded_rows if sample_job['discarded'] else rows).append(r)
    if hashes()!=baseline:raise RuntimeError('Source changed during job')
-   (out/(label+'-after.log')).write_text(docker('bash','-lc','tc -s qdisc show dev lo; tc -s class show dev lo'))
-   completed+=1;active=None;summarize(out,rows)
+   after=docker('bash','-lc','tc -s qdisc show dev lo; tc -s class show dev lo; ethtool -k lo')
+   (out/(label+'-after.log')).write_text(after)
+   if not a.smoke:
+    network_checks.append(dict(label=label,boundary='after',**check_network(after,profile,a.pacing,(out/(label+'-network.log')).read_text(),contracts[profile])))
+    (out/'network-validation.json').write_text(json.dumps(network_checks,indent=2))
+   exchange_rows.extend(job_exchanges);csv_write(out/'exchange_trials.csv',exchange_rows);csv_write(out/'discarded_phase_trials.csv',discarded_rows)
+   completed+=1;active=None;summarize(out,rows);save_start_alignment(out,rows,discarded_rows)
    with (out/'order.jsonl').open('a') as f:f.write(json.dumps(dict(job,sequence=seq,status='COMPLETED'))+'\n')
  except BaseException as e:failure=str(e) or type(e).__name__;raise
  finally:
@@ -240,7 +402,8 @@ for p in pathlib.Path('/proc').glob('[0-9]*/environ'):
    with (out/'network-cleanup.log').open('w') as f:
     cleanup.append(sp.run(['bash','Scripts/container-network.sh','--clear','--dev','lo'],env=env,stdout=f,stderr=sp.STDOUT).returncode)
     if original:cleanup.append(sp.run(['docker','exec','--privileged','kona-dev','ethtool','-K','lo',*[v for kv in original.items() for v in kv]],stdout=f,stderr=sp.STDOUT).returncode)
-  summarize(out,rows);(out/'status.json').write_text(json.dumps(dict(status='FAILED' if failure or any(cleanup) else 'COMPLETED',error=failure,planned=len(jobs),completed=completed,cleanup=cleanup),indent=2));lock.close()
+  csv_write(out/'exchange_trials.csv',exchange_rows);csv_write(out/'discarded_phase_trials.csv',discarded_rows)
+  summarize(out,rows);save_start_alignment(out,rows,discarded_rows);(out/'status.json').write_text(json.dumps(dict(status='FAILED' if failure or any(cleanup) else 'COMPLETED',error=failure,planned=len(jobs),completed=completed,cleanup=cleanup),indent=2));lock.close()
   if not failure and any(cleanup):raise RuntimeError('Cleanup failed')
  print('COMPLETED',out,flush=True)
 if __name__=='__main__':main()

@@ -92,7 +92,7 @@ CachedPlan prepare_cached_top_one(int size){
     }return plan;
 }
 uint64_t cached_rounds(const CachedPlan& plan){uint64_t n=0;for(const auto& l:plan){
-    size_t pairs=l.idx.size()/2;n+=KonaBenchConfig::chunks(pairs,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(2*pairs,KonaBenchConfig::MUL_CHUNK);}return n;}
+    size_t pairs=l.idx.size()/2;n+=KonaBenchConfig::chunks(pairs,KonaBenchConfig::dcf_chunk())+KonaBenchConfig::chunks(2*pairs,KonaBenchConfig::mul_chunk());}return n;}
 void cached_top_one(vector<Pair>& rows,CachedPlan& plan,bool minimum){
     for(auto& l:plan){cached_dcf->compare_in_vec(rows,l.idx,l.bits,!minimum);
         KonaCongKonaAdapter::ss_vec_kona_l2<64>(rows,l.idx,l.bits,player);}
@@ -140,7 +140,7 @@ struct Shape {
     void add(size_t pairs,bool swap) {
         comparisons+=pairs;if(swap)swaps+=pairs;
         bytes+=8*pairs+(swap?64*pairs:0);
-        exchanges+=KonaBenchConfig::chunks(pairs,KonaBenchConfig::DCF_CHUNK)+(swap?KonaBenchConfig::chunks(2*pairs,KonaBenchConfig::MUL_CHUNK):0);
+        exchanges+=KonaBenchConfig::chunks(pairs,KonaBenchConfig::dcf_chunk())+(swap?KonaBenchConfig::chunks(2*pairs,KonaBenchConfig::mul_chunk()):0);
         logical+=1+(swap?1:0);
     }
 };
@@ -276,7 +276,7 @@ void run_shared(const vector<Pair>& fixture,const vector<array<uint64_t,2>>& cle
                         vector<Pair> counts;cached_label_counts(labels,counts);cached_top_one(counts,p.dq_vote,false);winner=counts[k-1][1];
                     });
                     emit("DQ",k,prefix.metric,prefix.shape,vote,uint64_t(k)*k+k-1,24ULL*k*k+72ULL*(k-1),
-                        (KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::MUL_CHUNK))+cached_rounds(p.dq_vote),2+2*p.dq_vote.size(),
+                        (KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::dcf_chunk())+KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::mul_chunk()))+cached_rounds(p.dq_vote),2+2*p.dq_vote.size(),
                         add_metric(prefix.metric,vote),prefix.output,winner,true);
                 }else if(group==1){
                     auto work=fixture;Output out;Shape shape;Ring winner;KonaMaskVote::DcfVoteStats vs;SharedMetric selection,vote;
@@ -325,7 +325,12 @@ int run(int argc,const char** argv) {
     opt.add("0",0,1,0,"Regression only: first N rows; zero uses all","--limit");
     opt.add("wan",0,1,0,"Profile label; launcher must configure actual network","--network-profile");
     opt.add("",0,0,0,"One DQ max-k chain and one shared matrix block stage per k/repetition","--reuse-common");
+    opt.add(KonaBenchConfig::MATRIX_CHUNKING?"on":"off",0,1,0,"Communication chunking: on or off; default whole logical batch","--chunking");
     opt.parse(argc,argv);
+    string chunking;opt.get("--chunking")->getString(chunking);
+    if(chunking!="on"&&chunking!="off")throw runtime_error("chunking requires on or off");
+    KonaBenchConfig::ScopedChunking chunk_scope(chunking=="on");
+    cout<<"chunking="<<chunking<<"\nchunk_policy="<<(chunking=="on"?"bounded":"whole-logical-batch")<<'\n';
     int party,port,repeats,limit;string host,path,ks_text,structures_text,profile;
     opt.get("-p")->getInt(party);opt.get("-pn")->getInt(port);opt.get("-h")->getString(host);
     opt.get("--dataset")->getString(path);opt.get("--ks")->getString(ks_text);
@@ -453,7 +458,7 @@ int run(int argc,const char** argv) {
             total.comm=ablation_helpers::phase_delta(t0,t1,c0,c1);total.dcf_calls=selection.dcf_calls+vote.dcf_calls;
             const uint64_t vote_comparisons=structure=="DQ"?uint64_t(k)*k+k-1:vote_shape.comparators();
             const uint64_t vote_bytes=structure=="DQ"?24ULL*k*k+72ULL*(k-1):8*vote_shape.comparators()+16*vote_shape.mul_items;
-            const uint64_t vote_exchanges=structure=="DQ"?(KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::DCF_CHUNK)+KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::MUL_CHUNK))+ablation_helpers::cached_rounds(dq_vote_plan):vote_shape.exchanges();
+            const uint64_t vote_exchanges=structure=="DQ"?(KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::dcf_chunk())+KonaBenchConfig::chunks(uint64_t(k)*k,KonaBenchConfig::mul_chunk()))+ablation_helpers::cached_rounds(dq_vote_plan):vote_shape.exchanges();
             const bool accounting=selection.comm.sent_bytes==predicted.bytes&&
                 selection.comm.transport_actions==predicted.exchanges&&selection.dcf_calls==2*predicted.comparisons&&
                 vote.comm.sent_bytes==vote_bytes&&vote.comm.transport_actions==vote_exchanges&&

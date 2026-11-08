@@ -169,11 +169,12 @@ def main():
     parser=argparse.ArgumentParser(description='Independent WAN Top-k network ablation; instructions in script comments')
     parser.add_argument('--repeats',type=int,default=3);parser.add_argument('--timeout',type=int,default=1800)
     parser.add_argument('--smoke',action='store_true');parser.add_argument('--dry-run',action='store_true')
+    parser.add_argument('--chunking',choices=['on','off'],default=('on' if int(re.search(r'MATRIX_CHUNKING = (\d+);',(ROOT/'Machines/kona-bench-config.hpp').read_text()).group(1)) else 'off'),help='Communication chunking; default off for matrix experiments')
     a=parser.parse_args();os.chdir(ROOT)
     if a.repeats<1 or a.timeout<1:parser.error('positive repeats/timeout required')
     if a.smoke:a.repeats=1
     if a.dry_run:
-        print(json.dumps(dict(N=64 if a.smoke else 16384,d=32,classes=4,ks=KS,repeats=a.repeats,
+        print(json.dumps(dict(chunking=a.chunking,N=64 if a.smoke else 16384,d=32,classes=4,ks=KS,repeats=a.repeats,
             wan_rate_per_direction_mbps=None if a.smoke else 40,one_way_delay_ms=None if a.smoke else 20,
             cases=20*a.repeats,DQ_max_k_chains=a.repeats,matrix_block_executions=5*a.repeats,cpu=[0,2],
             headline='DQ/matrices composed shared stages; Merge continuous'),indent=2));return
@@ -182,7 +183,7 @@ def main():
     out=ROOT/'KNN-experiment-res'/('topk-network-ablation-'+('smoke-' if a.smoke else '')+stamp+'-'+str(os.getpid()))
     out.mkdir();print('RESULT_DIRECTORY='+str(out),flush=True)
     baseline=sources();env=dict(os.environ,KONA_NETWORK_PRIVILEGED='1');marker=out.name
-    manifest=dict(command=os.sys.argv,source_sha256=baseline,ks=KS,repeats=a.repeats,smoke=a.smoke,N=64 if a.smoke else 16384,
+    manifest=dict(chunking=a.chunking,command=os.sys.argv,source_sha256=baseline,ks=KS,repeats=a.repeats,smoke=a.smoke,N=64 if a.smoke else 16384,
         cpu_affinity=[0,2],core_exclusivity='NOT_VERIFIED',network='unshaped-smoke' if a.smoke else 'WAN40Mbps/direction20ms',
         reuse=dict(DQ='one max50 chain/repetition',matrices='one block execution/k/repetition'),expected_cases=20*a.repeats)
     (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
@@ -238,7 +239,7 @@ print(json.dumps(dict(runtime=str(runtime),key_source=str(keys),key_sha256={f:ha
                 f'KONA_BENCH_BINARY={REMOTE}/{TARGET}',f'KONA_DATASET_PATH={REMOTE}/ConstantPP/data/16384-32',
                 'bash',REMOTE+'/Scripts/kona-bench-log.sh','timeout','--kill-after=5',str(a.timeout),REMOTE+'/'+TARGET,
                 '-p',str(party),'-pn','35000','--dataset',REMOTE+'/ConstantPP/data/16384-32',
-                '--ks',','.join(map(str,KS)),'--repeats',str(a.repeats),'--network-profile','wan','--reuse-common']
+                '--ks',','.join(map(str,KS)),'--repeats',str(a.repeats),'--network-profile','wan','--reuse-common','--chunking',a.chunking]
             if a.smoke:args+=['--limit','64']
             procs.append(sp.Popen(['docker','exec','kona-dev','bash','-lc','cd '+shlex.quote(info['runtime'])+' && '+shlex.join(args)],stdout=handle,stderr=sp.STDOUT))
         deadline=time.monotonic()+a.timeout+30;sample=0

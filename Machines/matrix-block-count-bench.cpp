@@ -71,7 +71,12 @@ int run(int argc,const char** argv){
     opt.add("0",0,1,0,"Party","-p");opt.add("36000",0,1,0,"Port","-pn");opt.add("localhost",0,1,0,"Host","-h");
     opt.add("2",0,1,0,"Explicit equal block count","--blocks");opt.add("1",0,1,0,"Trial","--trial");
     opt.add("wan",0,1,0,"Actual profile configured by launcher","--network-profile");
-    opt.add("FullMat,PCM",0,1,0,"Method order, or FullMat/PCM for missing-point reruns","--order");opt.parse(argc,argv);
+    opt.add("FullMat,PCM",0,1,0,"Method order, or FullMat/PCM for missing-point reruns","--order");opt.add(KonaBenchConfig::MATRIX_CHUNKING?"on":"off",0,1,0,"Communication chunking: on or off; default whole logical batch","--chunking");
+    opt.parse(argc,argv);
+    string chunking;opt.get("--chunking")->getString(chunking);
+    if(chunking!="on"&&chunking!="off")throw runtime_error("chunking requires on or off");
+    KonaBenchConfig::ScopedChunking chunk_scope(chunking=="on");
+    cout<<"chunking="<<chunking<<"\nchunk_policy="<<(chunking=="on"?"bounded":"whole-logical-batch")<<'\n';
     int party,port,b,trial;string host,profile,order;
     opt.get("-p")->getInt(party);opt.get("-pn")->getInt(port);opt.get("-h")->getString(host);
     opt.get("--blocks")->getInt(b);opt.get("--trial")->getInt(trial);opt.get("--network-profile")->getString(profile);opt.get("--order")->getString(order);
@@ -132,7 +137,7 @@ int run(int argc,const char** argv){
             const auto expected_backend=KonaReducedDepthHybrid::Backend::DCF;
             if(backend!=expected_backend)throw runtime_error("unexpected comparison backend");
             metric.comparisons=pairs;metric.pcr=pcr?pairs:0;metric.dcf=pcr?0:pairs;metric.logical=pcr?8:1;
-            expected_bytes+=(pcr?70:8)*pairs;expected_exchanges+=(pcr?7:0)+KonaBenchConfig::chunks(pairs,KonaBenchConfig::DCF_CHUNK);
+            expected_bytes+=(pcr?70:8)*pairs;expected_exchanges+=(pcr?7:0)+KonaBenchConfig::chunks(pairs,KonaBenchConfig::dcf_chunk());
             expected_dcf+=metric.dcf;
             if(string(phase)=="matrix_rank"){rank=metric;rank_backend=KonaReducedDepthHybrid::backend_name(backend);}
             else if(string(phase)=="rank_mask"){mask=metric;mask_backend=KonaReducedDepthHybrid::backend_name(backend);}

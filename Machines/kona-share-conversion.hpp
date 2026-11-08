@@ -200,7 +200,7 @@ void mul_vector_additive_kona_l2_chunked(
         const std::vector<RingShare<K>>& v2,
         std::vector<RingShare<K>>& res,
         RealTwoPartyPlayer* player,
-        size_t chunk_size = KONA_DEFAULT_BATCH_CHUNK)
+        size_t chunk_size = KonaBenchConfig::mul_chunk())
 {
     assert(v1.size() == v2.size());
     res.resize(v1.size());
@@ -226,7 +226,7 @@ void mul_vector_additive_kona_l2_chunked(
         std::vector<RingShare<K>>& res,
         bool double_res,
         RealTwoPartyPlayer* player,
-        size_t chunk_size = KONA_DEFAULT_BATCH_CHUNK)
+        size_t chunk_size = KonaBenchConfig::mul_chunk())
 {
     if (!double_res)
     {
@@ -572,7 +572,7 @@ template<int K>
 std::vector<RingShare<K>> xor_bit_to_arithmetic_bit_batch_l2(
         const std::vector<RingShare<K>>& xor_bit_shares,
         RealTwoPartyPlayer* player,
-        size_t chunk_size = KONA_DEFAULT_BATCH_CHUNK)
+        size_t chunk_size = KonaBenchConfig::mul_chunk())
 {
     std::vector<RingShare<K>> b0(xor_bit_shares.size(), RingShare<K>(0));
     std::vector<RingShare<K>> b1(xor_bit_shares.size(), RingShare<K>(0));
@@ -622,7 +622,7 @@ template<int K>
 std::vector<RingShare<K>> B2A_batch_l2(
         const std::vector<RingShare<K>>& xor_shares,
         RealTwoPartyPlayer* player,
-        size_t chunk_size = KONA_DEFAULT_BATCH_CHUNK)
+        size_t chunk_size = KonaBenchConfig::mul_chunk())
 {
     return xor_bit_to_arithmetic_bit_batch_l2<K>(
             xor_shares, player, chunk_size);

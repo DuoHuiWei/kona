@@ -345,7 +345,7 @@ inline std::vector<Z2<PCR_K>> pcr_compare_lt_batch_l2(
         const std::vector<Z2<PCR_K>>& x_shares,
         const std::vector<Z2<PCR_K>>& y_shares,
         RealTwoPartyPlayer* player,
-        size_t b2a_chunk_size = KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK)
+        size_t b2a_chunk_size = KonaBenchConfig::mul_chunk())
 {
     // Correctness precondition: this L2 comparator interprets x-y via the
     // sign bit of (x-y) mod 2^64, so it matches unsigned x<y only when the
@@ -389,7 +389,7 @@ inline std::vector<Z2<PCR_K>> pcr_compare_gt_batch_l2(
         const std::vector<Z2<PCR_K>>& x_shares,
         const std::vector<Z2<PCR_K>>& y_shares,
         RealTwoPartyPlayer* player,
-        size_t b2a_chunk_size = KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK)
+        size_t b2a_chunk_size = KonaBenchConfig::mul_chunk())
 {
     return pcr_compare_lt_batch_l2(
             y_shares, x_shares, player, b2a_chunk_size);
@@ -401,7 +401,7 @@ inline void pcr_compare_in_vec_l2(
         std::vector<Z2<PCR_K>>& compare_res,
         bool greater_than,
         RealTwoPartyPlayer* player,
-        size_t b2a_chunk_size = KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK)
+        size_t b2a_chunk_size = KonaBenchConfig::mul_chunk())
 {
     // Drop-in replacement shape for Kona compare_in_vec(). The returned
     // compare_res entries are arithmetic Z2<64> bit shares duplicated as
@@ -437,7 +437,7 @@ inline void pcr_compare_in_vec_l2(
         std::vector<Z2<PCR_K>>& compare_res,
         bool greater_than,
         RealTwoPartyPlayer* player,
-        size_t b2a_chunk_size = KonaShareConversion::KONA_DEFAULT_BATCH_CHUNK)
+        size_t b2a_chunk_size = KonaBenchConfig::mul_chunk())
 {
     // Same interface as the array-valued Kona compare_in_vec(): compare only
     // shares[*][0] and leave labels to SS_vec(). Output is an arithmetic
