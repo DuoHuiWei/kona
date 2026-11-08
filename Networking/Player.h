@@ -9,6 +9,7 @@
  */
 
 #include <vector>
+#include <chrono>
 #include <set>
 #include <iostream>
 #include <fstream>
@@ -531,6 +532,9 @@ class VirtualTwoPartyPlayer : public TwoPartyPlayer
 
 public:
   mutable int VirtualTwoPartyPlayer_Round;
+  struct ExchangeTraceEvent { size_t bytes; long long begin_ns, end_ns; };
+  // Disabled by default. Bench owns pre-reserved storage and prints after timing.
+  mutable std::vector<ExchangeTraceEvent>* exchange_trace = nullptr;
   VirtualTwoPartyPlayer(Player& P, int other_player);
 
   // emulate RealTwoPartyPlayer
@@ -548,12 +552,22 @@ public:
   // Charge the overlapping wall interval once to the combined entry.
   void exchange_concurrent(const octetStream& outgoing, octetStream& incoming) const
   {
+    // Optional in-memory diagnostics. No I/O, payload or dependency changes.
+    auto* trace = exchange_trace;
+    std::chrono::steady_clock::time_point trace_start;
+    if (trace) trace_start = std::chrono::steady_clock::now();
     ++VirtualTwoPartyPlayer_Round;
     auto& stats = comm_stats["Exchanging full-duplex"];
     TimeScope scope(stats.add(outgoing));
     comm_stats.sent += outgoing.get_length();
     P.exchange_no_stats(other_player, outgoing, incoming);
     stats.add(incoming);
+    if (trace) {
+      auto trace_end = std::chrono::steady_clock::now();
+      trace->push_back({outgoing.get_length(),
+          std::chrono::duration_cast<std::chrono::nanoseconds>(trace_start.time_since_epoch()).count(),
+          std::chrono::duration_cast<std::chrono::nanoseconds>(trace_end.time_since_epoch()).count()});
+    }
   }
 
   void pass_around(octetStream& o, int _ = 1) const { (void)_, (void) o; throw not_implemented(); }

@@ -1,5 +1,12 @@
 # Bench记录与统一计时、通信统计口径
 
+2026-11-08短流量限速修正（后续实验优先采用）：
+
+- `Scripts/container-network.sh` 默认 `--pacing serialized`，版本 `20261108-serialized-v4`：两方向的netem在原单程延迟之外，分别配置与profile相同的`rate`，按包长模拟发送串行化，避免短批量仅靠HTB约1MiB令牌突发绕过发送时间。五档带宽、延迟数值、CPU映射、比较器和180/6000阈值不变。
+- 显式 `--pacing burst` 保留历史HTB限速、netem仅延迟的v3方式。旧实验不改标、不自动重跑；新旧网络模型不能只按“40Mbps/20ms”直接混表。保存网络脚本版本、pacing、双方netem实际rate、队列及offload证据。
+- WAN小规模验证：双向同时各发送512KiB，历史模式约21ms收到全部，serialized约129ms；15000项PPC不分chunk，新模式在线三次约380.640/559.109/382.528ms。不是人为延时或拟合370ms；TCP、双方起点和执行历史仍会增加开销，kernel定时精度也不能保证任意微小时间窗口严格匀速。此验证只覆盖WAN；其余四档已做命令配置检查，尚未声称实测吞吐验证。
+- 完整逐轮及双方记录：`KNN-experiment-res/serialized-rate-validation-wan-20261108T071454Z/`。测试结束清除整形并恢复原offload。通信按已有调用墙钟计时，仍与纯线路发送时间有区别。
+
 2026-11-06参数与轮次修正（后续实验优先采用）：
 
 - 共享默认值只在 `Machines/kona-bench-config.hpp` 定义：LAN阈值180、WAN阈值6000、DCF比较chunk16384对、乘法chunk16384项。协议默认值、C++入口和Python启动脚本均引用它；运行参数可显式覆盖阈值。网络profile仍由 `Scripts/container-network.sh` 管理，CPU映射仍由现有affinity模块管理。
