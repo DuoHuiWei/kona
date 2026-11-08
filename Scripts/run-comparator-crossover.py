@@ -42,14 +42,11 @@ Small regression (after active experiments finish): --smoke --widths 3 8193 1638
 import argparse,csv,datetime,fcntl,hashlib,json,os,re,shlex,signal,statistics,subprocess as sp,time,uuid
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];REMOTE='/usr/src/Garnet';TARGET='kona-comparator-crossover-bench.x'
-NETWORK_SCRIPT=ROOT/'Scripts/container-network.sh'
-NETWORK_SOURCE=NETWORK_SCRIPT.read_text()
+from kona_network_validation import NETWORK_SCRIPT, NETWORK_CONFIG, DEFAULT_PACING, network_contract, check_network
 BENCH_SOURCE=(ROOT/'Machines/kona-comparator-crossover-bench.cpp').read_text()
 COMMON_START_LEAD_MS=int(re.search(r'COMMON_START_LEAD_MS=(\d+)',BENCH_SOURCE).group(1))
 COMMON_START_TOLERANCE_US=int(re.search(r'COMMON_START_TOLERANCE_US=(\d+)',BENCH_SOURCE).group(1))
 COMMON_START_SPIN_US=int(re.search(r'COMMON_START_SPIN_US=(\d+)',BENCH_SOURCE).group(1))
-DEFAULT_PACING=re.search(r'^PACING=([a-z]+)$',NETWORK_SOURCE,re.M).group(1)
-NETWORK_CONFIG={name:dict(rate=rate,delay=delay) for name,rate,delay in re.findall(r'([a-z-]+)\) PARENT_RATE=\S+; RATE=(\S+); DELAY=([^ ;]+)',NETWORK_SOURCE)}
 WIDTHS={'lan':[32,64,128,160,180,200,256,512,1024],
         'wan':[6000,10000,14000,16000],
         'super-dc':[4,8,16,32,64,128,256],
@@ -57,7 +54,7 @@ WIDTHS={'lan':[32,64,128,160,180,200,256,512,1024],
         'mid-wan':[1000,2000,3000,4000,6000,8192]}
 def docker(*args):return sp.check_output(['docker','exec','kona-dev',*args],text=True,timeout=30)
 def hashes():
- files=[ROOT/'Machines/kona-comparator-crossover-bench.cpp',Path(__file__),ROOT/'Makefile',ROOT/'Scripts/container-network.sh',ROOT/'Scripts/codex-container-build.sh']
+ files=[ROOT/'Machines/kona-comparator-crossover-bench.cpp',Path(__file__),ROOT/'Makefile',ROOT/'Scripts/container-network.sh',ROOT/'Scripts/codex-container-build.sh',ROOT/'Scripts/kona_network_validation.py']
  files+=list((ROOT/'Machines').glob('kona-*.hpp'))+list((ROOT/'Networking').glob('*.h'))+list((ROOT/'Networking').glob('*.cpp'))+[ROOT/'Tools/octetStream.cpp',ROOT/'Tools/octetStream.h']
  return {str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
 def csv_write(path,rows):
@@ -112,48 +109,6 @@ def summarize(out,rows):
  lines=['# Comparator crossover calibration','','Time/bytes: max(P0,P1) per trial. Round arrays retain P0/P1 separately.','Theoretical rounds exclude chunks; actual rounds are exchange_rounds. Compare/swap layer details are in phase_trials.csv.','','| Profile | Width | Test | Backend | Trials | Total mean ms | Local mean ms | Communication mean ms | Median ms | SD ms | Bytes/party | Theory P0/P1 | Actual P0/P1 |','|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|']
  for r in summary:lines.append('| '+' | '.join(str(r[k]) for k in ['profile','width','test','backend','samples','mean_ms','mean_compute_ms','mean_communication_ms','median_ms','sd_ms','mean_sent_bytes'])+' | '+r['P0_theoretical_rounds_trials']+'/'+r['P1_theoretical_rounds_trials']+' | '+r['P0_exchange_rounds_trials']+'/'+r['P1_exchange_rounds_trials']+' |')
  (out/'summary.md').write_text('\n'.join(lines)+'\n')
-def profile_metadata(text):
- lines=[line for line in text.splitlines() if line.startswith('NETWORK_PROFILE ')]
- if len(lines)!=1:raise RuntimeError('Missing/ambiguous NETWORK_PROFILE evidence')
- return dict(item.split('=',1) for item in lines[0].split()[1:])
-def network_contract(profile,pacing):
- # Read the exact mode/version from the single shell source of truth, no
- # duplicate v3/v4 version literals in this organizer. Dry-run never uses Docker.
- output=sp.check_output(['bash',str(NETWORK_SCRIPT),profile,'lo','--pacing',pacing,'--dry-run'],text=True)
- contract=profile_metadata(output)
- if contract.get('pacing')!=pacing or contract.get('profile')!=profile or contract.get('action')!='apply' or not contract.get('version'):
-  raise RuntimeError('Invalid network source-of-truth contract')
- return contract
-def check_network(text,profile,pacing=DEFAULT_PACING,profile_log='',contract=None):
- config=NETWORK_CONFIG[profile]
- expected=contract if contract is not None else network_contract(profile,pacing)
- metadata=profile_metadata(profile_log)
- for key in ['version','pacing','action','profile','container','dev','rate_per_direction','one_way_delay','parent_rate']:
-  if metadata.get(key)!=expected.get(key):raise RuntimeError('Network profile metadata mismatch: '+key)
- def rate(value):
-  m=re.fullmatch(r'([0-9.]+)([kmg]?)bit',value.lower())
-  if not m:raise RuntimeError('Unrecognized rate '+value)
-  return float(m[1])*{'':1,'k':1000,'m':1000000,'g':1000000000}[m[2]]
- def delay(value):
-  m=re.fullmatch(r'([0-9.]+)(us|ms|s)',value)
-  if not m:raise RuntimeError('Unrecognized delay '+value)
-  return float(m[1])*{'us':1,'ms':1000,'s':1000000}[m[2]]
- for lane in ['10','20']:
-  match=re.search(r'^class htb 1:'+lane+r' .*?rate (\S+)',text,re.M)
-  if not match or rate(match[1])!=rate(config['rate']):raise RuntimeError('Lane rate mismatch')
-  lines=re.findall(r'^qdisc netem '+lane+r':[^\n]*',text,re.M)
-  if len(lines)!=1:raise RuntimeError('Missing/ambiguous netem lane '+lane)
-  match=re.search(r'\bdelay (\S+)',lines[0])
-  if not match or abs(delay(match[1])-delay(config['delay']))>2:raise RuntimeError('Lane delay mismatch')
-  match=re.search(r'\brate (\S+)',lines[0])
-  if pacing=='serialized':
-   if not match or rate(match[1])!=rate(config['rate']):raise RuntimeError('Netem lane '+lane+' rate mismatch/missing')
-  elif pacing=='burst':
-   if match:raise RuntimeError('Unexpected netem rate in historical burst mode')
-  else:raise RuntimeError('Unsupported network pacing')
- for feature in ['tcp-segmentation-offload','generic-segmentation-offload','generic-receive-offload']:
-  if not re.search(r'^'+feature+r': off',text,re.M):raise RuntimeError('Offload configuration mismatch')
- return dict(profile=profile,pacing=pacing,version=metadata['version'],netem_rate=config['rate'] if pacing=='serialized' else None)
 def exchange_trace_rows(text,phase,job,party,enabled):
  traces={}
  for line in text.splitlines():

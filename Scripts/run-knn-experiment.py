@@ -17,9 +17,9 @@ is added to offline L2 preparation. No thresholds/algorithms are retuned.
 --monitor measures both bandwidth lanes and RTT ONCE per profile before
 protocols, using the existing TCP probe (64 MiB/lane, including simultaneous
 lanes). No probe traffic overlaps protocol timing. Receiver throughput is a
-network check, not protocol bytes divided by total wall time. During each job
+network check, not protocol bytes divided by total wall time. Mandatory network contract checks run before/after EVERY job even without --monitor. During each job
 a CPU4 observer samples /proc (RSS/CPU/affinity), memory/swap, TCP and tc every
-5 seconds, checks qdisc/rate/delay/offload consistency, and records entry/exit
+5 seconds, checks both HTB/netem rates, delay/offload consistency, and records entry/exit
 snapshots. Short jobs may finish between samples; C++ affinity checks still
 apply to every job. CPU affinity is not system-level core exclusivity.
 Monitoring is read-only and outside C++ timers, but its system overhead is
@@ -30,7 +30,7 @@ no automatic retries, no new benchmark/launcher/readme files are needed.
 KONA two-dataset mode calls the unchanged original KONA full-flow bench:
 original ABY2 distance, original per-layer Top1 and original batch k^2 vote.
 Use --kona-backend batched-dcf explicitly to select the historical cached
-batch comparator/graph/chunk policy from kona-mainpath-esd-topk-dcf-bench.cpp;
+batch comparator/graph/network graph from kona-mainpath-esd-topk-dcf-bench.cpp; communication chunking defaults off and --chunking on restores 16384;
 full flow also uses the original vote logic through that batch DCF backend.
 Default original retains native per-evaluation key reading for old controls.
 MNIST69999x784 and Iris149x4 each have one extra query. Trial outermost,
@@ -122,20 +122,30 @@ import uuid
 ROOT=Path(__file__).resolve().parents[1]
 REMOTE='/usr/src/Garnet'
 TARGET='knn-bench.x'
+from kona_network_validation import network_contract, check_network
 # The same header supplies C++ protocol and Python launch defaults.
 CONFIG_HEADER=ROOT/'Machines/kona-bench-config.hpp'
 DEFAULTS={k:int(v) for k,v in re.findall(r'constexpr std::size_t (\w+) = (\d+);',CONFIG_HEADER.read_text())}
 if not {'DCF_CHUNK','MUL_CHUNK','LAN_THRESHOLD','WAN_THRESHOLD'} <= DEFAULTS.keys():
     raise RuntimeError('Missing shared benchmark defaults in '+str(CONFIG_HEADER))
 MATRIX_CHUNKING_DEFAULT='on' if DEFAULTS['MATRIX_CHUNKING'] else 'off'
+KONA_CHUNKING_DEFAULT='on' if DEFAULTS['KONA_CHUNKING'] else 'off'
+
+def effective_chunking(a,scheme):
+    if scheme=='hybrid':return a.chunking or MATRIX_CHUNKING_DEFAULT
+    if scheme=='kona' and a.kona_backend=='batched-dcf':return a.chunking or KONA_CHUNKING_DEFAULT
+    return 'on'
 KS=[1,2,3,5,20,100]
 
 # The observer runs in the existing container on CPU4, separate from P0/P1.
 # It writes JSON lines directly to the result archive, never from timed C++.
 MONITOR_PROGRAM=r'''
 import json,os,pathlib,re,select,subprocess,sys,time
+sys.path.insert(0,'/usr/src/Garnet/Scripts')
+from kona_network_validation import check_network
 os.sched_setaffinity(0,{4})
-profile,marker=sys.argv[1:]
+profile,marker,profile_log,contract_json=sys.argv[1:]
+contract=json.loads(contract_json)
 violations=[];baseline=None;samples=0;seen={}
 def command(args):
  return subprocess.check_output(args,text=True,timeout=4)
@@ -145,20 +155,8 @@ def snapshot():
  config={kind:command(['tc',kind,'show','dev','lo']) for kind in ['qdisc','class','filter']}
  flags=command(['ethtool','-k','lo'])
  offloads={k:re.search(r'^'+k+r': (\S+)',flags,re.M).group(1) for k in ['tcp-segmentation-offload','generic-segmentation-offload','generic-receive-offload']}
- rates={k:v for k,v in re.findall(r'^class htb (1:(?:10|20)) .*? rate (\S+)',config['class'],re.M)}
- delays={k:(v or '0ms') for k,v in re.findall(r'^qdisc netem (10:|20:)[^\n]*?limit \d+(?: delay (\S+))?',config['qdisc'],re.M)}
- expected_rate='1Gbit' if profile=='lan' else '40Mbit'
- expected_delay_us=500 if profile=='lan' else 20000
- def delay_us(value):
-  match=re.fullmatch(r'([0-9.]+)(us|ms|s)',value)
-  if not match:return None
-  return float(match[1])*{'us':1,'ms':1000,'s':1000000}[match[2]]
- if rates!={'1:10':expected_rate,'1:20':expected_rate}:violations.append('rate mismatch '+str(rates))
- # tc text formatting / kernel time quantization can render 0.5ms as 499us.
- # Keep raw settings in the log; permit only a two-microsecond difference.
- parsed_delays={k:delay_us(v) for k,v in delays.items()}
- if set(parsed_delays)!={'10:','20:'} or any(v is None or abs(v-expected_delay_us)>2 for v in parsed_delays.values()):violations.append('delay mismatch '+str(delays))
- if set(offloads.values())!={'off'}:violations.append('offload mismatch '+str(offloads))
+ try:check_network('\n'.join(config.values())+'\n'+flags,profile,'serialized',profile_log,contract)
+ except RuntimeError as e:violations.append(str(e))
  signature=dict(config=config,offloads=offloads)
  if baseline is None:baseline=signature
  elif baseline!=signature:violations.append('network configuration changed')
@@ -215,7 +213,7 @@ def network_probe(a,out,profile):
 def start_monitor(a,out,job,profile):
     handle=(out/(job+'-monitor.jsonl')).open('w')
     proc=subprocess.Popen(['docker','exec','-i',a.container,'python3','-u','-c',
-        MONITOR_PROGRAM,profile,out.name+'/'+job],stdin=subprocess.PIPE,stdout=handle,stderr=handle,text=True)
+        MONITOR_PROGRAM,profile,out.name+'/'+job,(out/(job+'-network.log')).read_text(),json.dumps(network_contract(profile,'serialized',a.container))],stdin=subprocess.PIPE,stdout=handle,stderr=handle,text=True)
     # Wait for the initial capture so no protocol starts before validation.
     path=Path(handle.name);deadline=time.monotonic()+15
     while time.monotonic()<deadline:
@@ -246,7 +244,7 @@ def source_hashes():
     names=['Machines/kona-bench-config.hpp','Machines/knn-bench.cpp','Scripts/run-knn-experiment.py','Makefile',
         'Networking/Player.h','Networking/Player.cpp','Networking/Exchanger.h','Networking/sockets.cpp',
         'Tools/octetStream.h','Tools/octetStream.cpp',
-        'Scripts/codex-container-build.sh','Scripts/container-network.sh','Scripts/kona-bench-log.sh',
+        'Scripts/codex-container-build.sh','Scripts/container-network.sh','Scripts/kona-bench-log.sh','Scripts/kona_network_validation.py',
         'Scripts/measure-container-profile-throughput.py',
         'Machines/kona-bench-affinity.hpp','Machines/secknn.cpp','Machines/kona-upstream.cpp',
         'Machines/kona-cong-topk.hpp','Machines/kona-reduced-depth-cong-topk.hpp',
@@ -338,7 +336,9 @@ def command_arguments(a,item):
           '--k',str(item['k']),'--network-profile',policy]
     if item['scope'] in ['checkpoints','shared']:args += ['--ks',item['ks']]
     if item['scope']=='checkpoints':args += ['--vote-order',item['ks']]
-    if item['bench_scheme']=='kona':args += ['--kona-backend',a.kona_backend]
+    if item['bench_scheme']=='kona':
+        args += ['--kona-backend',a.kona_backend]
+        if a.kona_backend=='batched-dcf':args += ['--chunking',effective_chunking(a,'kona')]
     if item['bench_scheme']=='secknn':args += ['--topk-mode',a.topk_mode]
     if item['bench_scheme']=='constantpp':args += ['--secmax-mode',a.secmax_mode]
     if item['bench_scheme']=='shao':args += ['--vote-labels',str(a.label_domain)]
@@ -422,7 +422,7 @@ def main():
     p.add_argument('--profiles',nargs='+',choices=['lan','wan','native'],default=None)
     p.add_argument('--dataset',default='arcene')
     p.add_argument('--datasets',nargs='+',help='Dataset sweep: supported full flows, distance-only for ConstantPP/SecKNN/KONA/Shao, KONA topk, Shao topk-vote')
-    p.add_argument('--kona-backend',choices=['original','batched-dcf'],default='original')
+    p.add_argument('--kona-backend',choices=['original','batched-dcf'],default='batched-dcf')
     p.add_argument('--e2e-only',action='store_true',help='Headline only measured full KNN; retain raw verification metrics')
     p.add_argument('--monitor',action='store_true',help='Preflight bandwidth/RTT; sample processes/TCP/tc/memory on CPU4')
     p.add_argument('--container',default=os.environ.get('KONA_CONTAINER','kona-dev'))
@@ -433,12 +433,12 @@ def main():
     p.add_argument('--lan-threshold',type=int,default=DEFAULTS['LAN_THRESHOLD'],help='Hybrid LAN assertion; must equal kona-bench-config.hpp')
     p.add_argument('--wan-threshold',type=int,default=DEFAULTS['WAN_THRESHOLD'],help='Hybrid WAN assertion; must equal kona-bench-config.hpp')
     p.add_argument('--comparator',choices=['hybrid','dcf','pcr'],default='hybrid',help='Hybrid selection backend; optimized vote stays DCF')
-    p.add_argument('--chunking',choices=['on','off'],default=None,help='Hybrid only: communication chunking; default off, on uses shared 16384 limits')
+    p.add_argument('--chunking',choices=['on','off'],default=None,help='Hybrid or Kona batched-dcf: default off; on restores shared 16384 limits')
     p.add_argument('--matrix-backend',choices=['auto','dcf','pcr'],default='auto',help='Hybrid matrix ranking override only')
     p.add_argument('--output',type=Path)
     p.add_argument('--dry-run',action='store_true')
     a=p.parse_args();os.chdir(ROOT)
-    if a.chunking is not None and a.scheme!='hybrid':p.error('--chunking is only applicable to hybrid')
+    if a.chunking is not None and not (a.scheme=='hybrid' or (a.scheme=='kona' and a.kona_backend=='batched-dcf')):p.error('--chunking requires hybrid or kona/batched-dcf')
     if (a.comparator!='hybrid' or a.matrix_backend!='auto') and (a.scheme!='hybrid' or a.scope!='full'):
         p.error('Explicit selection backend overrides currently require --scheme hybrid --scope full')
     if a.lan_threshold!=DEFAULTS['LAN_THRESHOLD'] or a.wan_threshold!=DEFAULTS['WAN_THRESHOLD']:
@@ -474,9 +474,11 @@ def main():
     if len(set(a.ks))!=len(a.ks) or len(set(a.profiles))!=len(a.profiles):p.error('duplicate k/profile')
     jobs=schedule(a)
     if a.scheme=='constantpp' and a.scope=='experiment' and a.n<2:p.error('pre-vote requires N>1')
-    manifest=dict(scheme=a.scheme,scope=a.scope,dataset=a.dataset,N=a.n,features=a.features,query_count=1,
+    contracts={profile:network_contract(profile,'serialized',a.container) for profile in a.profiles if profile!='native'}
+    if any(not c['version'].endswith('-serialized-v4') for c in contracts.values()):p.error('Formal KNN requires serialized-v4 network configuration')
+    manifest=dict(network_pacing='serialized',network_contracts=contracts,network_validation='mandatory_before_after_independent_of_monitor',scheme=a.scheme,scope=a.scope,dataset=a.dataset,N=a.n,features=a.features,query_count=1,
         datasets=a.dataset_specs,kona_backend=a.kona_backend if a.scheme=='kona' else 'NOT_APPLICABLE',headline_e2e_only=a.e2e_only,planned_pairs=len(jobs),schedule=jobs,cpu_affinity=[0,2],core_exclusivity='NOT_VERIFIED',warmup_trials=0,
-        secmax_mode=a.secmax_mode,topk_mode=a.topk_mode,comparator=a.comparator,matrix_backend=a.matrix_backend,chunking=(a.chunking or MATRIX_CHUNKING_DEFAULT) if a.scheme=='hybrid' else 'on',chunk_limits=dict(dcf=DEFAULTS['DCF_CHUNK'],mul=DEFAULTS['MUL_CHUNK']) if a.scheme!='hybrid' or a.chunking=='on' else None,rounds_schema='theoretical_without_chunk_vs_actual_exchange',hybrid_thresholds=dict(lan=a.lan_threshold,wan=a.wan_threshold),shao_network='rotated-msb-all-layers',shao_vote='batched-dcf',
+        secmax_mode=a.secmax_mode,topk_mode=a.topk_mode,comparator=a.comparator,matrix_backend=a.matrix_backend,chunking=effective_chunking(a,a.scheme),chunk_limits=dict(dcf=DEFAULTS['DCF_CHUNK'],mul=DEFAULTS['MUL_CHUNK']) if effective_chunking(a,a.scheme)=='on' else None,rounds_schema='theoretical_without_chunk_vs_actual_exchange',hybrid_thresholds=dict(lan=a.lan_threshold,wan=a.wan_threshold),shao_network='rotated-msb-all-layers',shao_vote='batched-dcf',
         monitoring=dict(enabled=a.monitor,observer_cpu=4,sample_seconds=5,network_probe_mib=64),
         phase_semantics='full=measured E2E; checkpoints/shared/distance+topk-vote=staged/composed')
     if a.dry_run:print(json.dumps(manifest,indent=2));return
@@ -490,8 +492,26 @@ def main():
     print(f'RESULT_DIRECTORY={out}',flush=True)
     baseline=source_hashes();manifest.update(source_sha256=baseline,command=sys.argv,started_utc=stamp)
     (out/'batch_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    rows=[];completed=0;failure=None;original=None;touched=False;started=time.monotonic()
+    rows=[];network_checks=[];completed=0;failure=None;original=None;touched=False;started=time.monotonic()
     env=dict(os.environ,KONA_CONTAINER=a.container,KONA_NETWORK_PRIVILEGED='1')
+    def validate_network(item,boundary):
+        job=item['job'];profile=item['network_profile']
+        snapshot=subprocess.check_output(['docker','exec',a.container,'bash','-lc','set -e; tc -s qdisc show dev lo; tc -s class show dev lo; ethtool -k lo'],text=True,timeout=30)
+        (out/(job+'-network-'+boundary+'.log')).write_text(snapshot)
+        if profile=='native':
+            if any(line.startswith('qdisc ') and not line.startswith('qdisc noqueue ') for line in snapshot.splitlines()):
+                raise RuntimeError('Unexpected shaping in native regression')
+            result=dict(profile=profile,status='UNSHAPED_NATIVE_REGRESSION')
+        else:
+            try:
+                result=check_network(snapshot,profile,'serialized',(out/(job+'-network.log')).read_text(),contracts[profile])
+            except RuntimeError as error:
+                network_checks.append(dict(job=job,boundary=boundary,profile=profile,status='FAILED',error=str(error)))
+                (out/'network-validation.json').write_text(json.dumps(network_checks,indent=2)+'\n')
+                raise
+        network_checks.append(dict(job=job,boundary=boundary,**result))
+        (out/'network-validation.json').write_text(json.dumps(network_checks,indent=2)+'\n')
+
     def stop(sig,frame):raise KeyboardInterrupt(f'signal {sig}')
     signal.signal(signal.SIGTERM,stop)
     def frozen():
@@ -537,9 +557,10 @@ print(json.dumps(dict(runtime_dir=str(runtime),offload=flags,meta=dims,binary_sh
             if item['network_profile']!='native':
                 touched=True
                 with (out/f'{job}-network.log').open('w') as log:
-                    subprocess.run(['bash','Scripts/container-network.sh',item['network_profile'],'lo'],check=True,env=env,stdout=log,stderr=subprocess.STDOUT)
+                    subprocess.run(['bash','Scripts/container-network.sh',item['network_profile'],'lo','--pacing','serialized'],check=True,env=env,stdout=log,stderr=subprocess.STDOUT)
             if a.monitor and item['network_profile'] not in probed_profiles:
                 network_probe(a,out,item['network_profile']);probed_profiles.add(item['network_profile'])
+            validate_network(item,'before')
             ps=[];handles=[];paths=[];exits=None;job_start=time.monotonic()
             monitor=None
             try:
@@ -584,7 +605,11 @@ for pid in matching():
                     if proc.poll() is None:proc.terminate()
                 for proc in ps:proc.wait()
                 for h in handles:h.close()
-                if monitor:stop_monitor(monitor)
+                try:
+                    if monitor:stop_monitor(monitor)
+                finally:
+                    validate_network(item,'after')
+                    frozen()
             with (out/'order.jsonl').open('a') as f:f.write(json.dumps(dict(item,status='COMPLETED' if not any(exits) else 'FAILED',
                 sequence=sequence,exits=exits,wall_seconds=time.monotonic()-job_start))+'\n')
             if any(exits):raise RuntimeError(f'{job} failed {exits}; inspect raw logs, no auto retry')
@@ -593,8 +618,7 @@ for pid in matching():
                 if set(phases)!=expected(a,item):raise RuntimeError(f'{job}: missing/extra phases: {set(phases)}')
                 if meta.get('accounting_check')!='PASS' or meta.get('correctness')!='PASS':raise RuntimeError(f'{job}: accounting/correctness failed')
                 if meta.get('benchmark_scheme')!=item['bench_scheme'] or meta.get('benchmark_scope')!=item['scope']:raise RuntimeError('Wrong scheme/scope')
-                effective_chunking=(a.chunking or MATRIX_CHUNKING_DEFAULT) if item['bench_scheme']=='hybrid' else 'on'
-                if meta.get('chunking')!=effective_chunking:
+                if meta.get('chunking')!=effective_chunking(a,item['bench_scheme']):
                     raise RuntimeError('Effective chunking differs from requested configuration')
                 if item['bench_scheme']=='hybrid' and item['scope']!='vote':
                     threshold_profile='lan' if item['network_profile']=='native' else item['network_profile']

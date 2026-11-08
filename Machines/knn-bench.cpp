@@ -1347,7 +1347,7 @@ int run(int argc,const char** argv) {
     opt.add("UNVERIFIED",0,1,0,"Network label; actual snapshot in wrapper","--network-profile");
     opt.add("1,2,3,5,20,100",0,1,0,"Cumulative Top-k checkpoints","--checkpoints");
     opt.add("",0,1,0,"Vote order; permutation of checkpoints","--vote-order");
-    opt.add("original",0,1,0,"original or historical cached batched-dcf components","--kona-backend");
+    opt.add("batched-dcf",0,1,0,"batched-dcf performance baseline or explicit original control","--kona-backend");
     parse_argv(argc,argv);
     reject_unknown_options(opt);
     opt.get("--k")->getInt(k_const);
@@ -3139,7 +3139,7 @@ int main(int argc,char** argv) {
         for(int i=1;i<argc;++i){string a=argv[i];
             if(a=="--help"||a=="-?"){
                 cout<<"knn-bench.x --scheme constantpp|secknn|kona|hybrid|shao --scope full|distance|checkpoints|shared|pre-vote|topk|terminal|vote [options]\n"
-                    <<"Hybrid: --chunking off|on (default off)\nCommon: -p 0|1 -pn PORT --dataset PATH --k K --ks 1,2,3,5,20,100 --network-profile lan|wan\n"
+                    <<"Hybrid/Kona batched-dcf: --chunking off|on (default off)\nCommon: -p 0|1 -pn PORT --dataset PATH --k K --ks 1,2,3,5,20,100 --network-profile lan|wan\n"
                     <<"full measures real continuous distance+Top-k+vote; checkpoints/shared retain explicit staged/composed semantics.\n";return 0;}
             if(a=="--scheme"||a=="--scope"||a=="--dataset"){
                 if(++i>=argc)throw runtime_error("missing value for "+a);
@@ -3162,11 +3162,19 @@ int main(int argc,char** argv) {
                ((scheme=="kona"||scheme=="secknn")?scope!="checkpoints":!(scheme=="hybrid"&&scope=="shared"&&flag=="--ks")))
                 throw runtime_error(flag+" is not applicable to "+scheme+"/"+scope);
         }
-        bool chunking = scheme != "hybrid" || KonaBenchConfig::MATRIX_CHUNKING;
+        auto requested_kona_backend=find(args.begin(),args.end(),"--kona-backend");
+        if(scheme=="kona" && requested_kona_backend==args.end()) {
+            args.push_back("--kona-backend");args.push_back("batched-dcf");
+            requested_kona_backend=find(args.begin(),args.end(),"--kona-backend");
+        }
+        const bool kona_batched=scheme=="kona" && requested_kona_backend+1!=args.end() &&
+            *(requested_kona_backend+1)=="batched-dcf";
+        bool chunking = scheme=="hybrid" ? bool(KonaBenchConfig::MATRIX_CHUNKING) :
+            kona_batched ? bool(KonaBenchConfig::KONA_CHUNKING) : true;
         bool chunking_seen = false;
         for (size_t i=0;i<args.size();) {
             if (args[i]!="--chunking") { ++i; continue; }
-            if (scheme!="hybrid") throw runtime_error("--chunking is only applicable to hybrid");
+            if (scheme!="hybrid" && !kona_batched) throw runtime_error("--chunking requires hybrid or kona/batched-dcf");
             if (i+1>=args.size() || (args[i+1]!="on" && args[i+1]!="off"))
                 throw runtime_error("--chunking requires on or off");
             if (chunking_seen) throw runtime_error("duplicate --chunking");

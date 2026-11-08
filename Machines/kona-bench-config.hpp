@@ -10,6 +10,7 @@
 namespace KonaBenchConfig {
 constexpr std::size_t DCF_CHUNK = 16384;
 constexpr std::size_t MUL_CHUNK = 16384;
+constexpr std::size_t KONA_CHUNKING = 0; // cached/batched DCF performance path
 constexpr std::size_t MATRIX_CHUNKING = 0; // 0=whole batch, 1=bounded
 // Runtime override is scoped to explicitly opted-in experiment processes.
 // Other schemes retain the historical constants above. INT_MAX also respects
