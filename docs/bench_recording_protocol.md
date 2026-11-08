@@ -1,5 +1,23 @@
 # Bench记录与统一计时、通信统计口径
 
+2026-11-08 当前正式阈值：**LAN=180、WAN=26000**，唯一来源为
+`Machines/kona-bench-config.hpp`。按整个逻辑层／批次的比较项数判断：
+宽度 ≤ 阈值使用 DCF，宽度 > 阈值使用 PPC；不按通信 chunk 宽度判断。
+安全投票仍固定优化批量 DCF。Ours／矩阵默认不分通信 chunk，保持已确认设置。
+本条取代下面历史记录中的旧阈值；历史日志和历史结果不改写。
+验证记录：LAN180/181 与 WAN26000/26001 的自动选择边界通过；WAN26000
+实际比较＋swap走DCF（2次交换），WAN26001走PPC（9次交换），无chunk。
+Iris完整LAN/WAN和Arcene共享k=1/5/100入口均通过正确性、通信计数及阈值日志检查。
+这是无整形功能回归，不是新性能数据；日志保存在
+`KNN-experiment-res/threshold26000-regression-20261108T092202Z/`。
+
+正式 KNN 入口不再接受与共享配置冲突的 `--lan-threshold`／`--wan-threshold`，
+`--threshold` 仅允许 0。匹配的旧参数只作配置断言；过时 WAN6000 或 LAN10
+在联网前失败。Python 不再重复向 C++ 传递阈值，仍在 manifest 记录共享值，
+并逐方核对日志中的来源、两档阈值、生效阈值及零覆盖状态。
+显式固定比较器／矩阵后端的诊断和消融保留原用途，日志记录对应覆盖；
+它们不能当作自动 Hybrid 测量。交叉点脚本中的宽度 6000 是扫描点，不是阈值。
+
 2026-11-08短流量限速修正（后续实验优先采用）：
 
 - `Scripts/container-network.sh` 默认 `--pacing serialized`，版本 `20261108-serialized-v4`：两方向的netem在原单程延迟之外，分别配置与profile相同的`rate`，按包长模拟发送串行化，避免短批量仅靠HTB约1MiB令牌突发绕过发送时间。五档带宽、延迟数值、CPU映射、比较器和180/6000阈值不变。
@@ -16,7 +34,7 @@
 
 2026-11-06参数与轮次修正（后续实验优先采用）：
 
-- 共享默认值只在 `Machines/kona-bench-config.hpp` 定义：LAN阈值180、WAN阈值6000、DCF比较chunk16384对、乘法chunk16384项。协议默认值、C++入口和Python启动脚本均引用它；运行参数可显式覆盖阈值。网络profile仍由 `Scripts/container-network.sh` 管理，CPU映射仍由现有affinity模块管理。
+- 共享默认值只在 `Machines/kona-bench-config.hpp` 定义：LAN阈值180、WAN阈值26000、DCF比较chunk16384对、乘法chunk16384项。协议默认值、C++入口和Python启动脚本均引用它；正式入口拒绝冲突阈值覆盖。网络profile仍由 `Scripts/container-network.sh` 管理，CPU映射仍由现有affinity模块管理。
 - 只有两个轮次口径：`theoretical_rounds` 是不展开chunk的协议依赖阶段数；`exchange_rounds` 是实际执行的通信交换数（真实轮次）。发送/接收原始动作计数改名 `transport_actions`，仅作校验，不是第三种轮次。保留P0、P1各自记录，不拿结构深度或单方发送次数替代通信轮次。
 - 共享Cong前缀按每个分支的真实依赖路径累计理论轮次；投票模块自己记录逻辑比较/乘法批次及展开chunk后的交换数。完整在线仍连续单独计时，统计和验证在计时结束后完成。
 - `hybrid full` 的 `--comparator hybrid|dcf|pcr` 在公共参数解析中落实；`--matrix-backend` 只覆盖矩阵排名，优化投票始终DCF。统一脚本支持这些显式覆盖，并检查C++回报值；不支持的scope明确拒绝，不能静默忽略。

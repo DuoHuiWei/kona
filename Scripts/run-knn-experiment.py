@@ -9,7 +9,7 @@ Ours six-dataset formal run (one existing C++ body + this launcher):
 Each dataset has exactly one stored query; all stored training rows are used.
 Repetition outermost, rotate the first dataset, LAN then WAN for each dataset.
 Keep original partition/cutoff and vote_dcf_optimized; thresholds default to
-LAN180/WAN6000 (LAN confirmed 2026-11-06), recorded explicitly; C++ binds
+LAN180/WAN26000 (WAN confirmed 2026-11-08), recorded explicitly; C++ binds
 P0/CPU0 and P1/CPU2. Full ONLINE (not offline-inclusive E2E) is independently
 timed through winner shares; retain distance/block_cong/terminal/topk/vote,
 actual per-party counters and theoretical rounds. No input sharing over WAN
@@ -94,7 +94,7 @@ Build/sync once through the existing kona-dev. Reuse existing test keys via
 isolated symlinks; no image/dependency/key generation. LAN1Gbps/direction0.5ms,
 WAN40Mbps/direction20ms one-way. --profiles native leaves qdisc unchanged and
 uses LAN comparator policy, only for unshaped checks. Default hybrid thresholds
-LAN180/WAN6000 and public Arcene label domain2. Clear shaping/restore offloads on
+LAN180/WAN26000 and public Arcene label domain2. Clear shaping/restore offloads on
 handled completion/failure; forced kill/power loss cannot guarantee cleanup.
 
 A process lock prevents concurrent launches. Related files must stay frozen;
@@ -345,8 +345,7 @@ def command_arguments(a,item):
     if item['bench_scheme']=='hybrid':
         args += ['--chunking',a.chunking or MATRIX_CHUNKING_DEFAULT,'-n',str(a.n),'-m','pruned','-r','1','--warmup','0','--vote-labels',str(a.label_domain)]
         if item['scope']!='vote':
-            args += ['--comparator',a.comparator,'--matrix-backend',a.matrix_backend,
-                '--lan-threshold',str(a.lan_threshold),'--wan-threshold',str(a.wan_threshold)]
+            args += ['--comparator',a.comparator,'--matrix-backend',a.matrix_backend]
     return args
 
 def parse(path,item):
@@ -431,8 +430,8 @@ def main():
     p.add_argument('--timeout',type=int,default=3600)
     p.add_argument('--secmax-mode',choices=['paper-local-l2','legacy'],default='paper-local-l2')
     p.add_argument('--topk-mode',choices=['scalar'],default='scalar',help='Native SecKNN scan only; historical layered/tournament is disabled')
-    p.add_argument('--lan-threshold',type=int,default=DEFAULTS['LAN_THRESHOLD'],help='Hybrid LAN cutoff; default from kona-bench-config.hpp')
-    p.add_argument('--wan-threshold',type=int,default=DEFAULTS['WAN_THRESHOLD'],help='Hybrid WAN cutoff; default from kona-bench-config.hpp')
+    p.add_argument('--lan-threshold',type=int,default=DEFAULTS['LAN_THRESHOLD'],help='Hybrid LAN assertion; must equal kona-bench-config.hpp')
+    p.add_argument('--wan-threshold',type=int,default=DEFAULTS['WAN_THRESHOLD'],help='Hybrid WAN assertion; must equal kona-bench-config.hpp')
     p.add_argument('--comparator',choices=['hybrid','dcf','pcr'],default='hybrid',help='Hybrid selection backend; optimized vote stays DCF')
     p.add_argument('--chunking',choices=['on','off'],default=None,help='Hybrid only: communication chunking; default off, on uses shared 16384 limits')
     p.add_argument('--matrix-backend',choices=['auto','dcf','pcr'],default='auto',help='Hybrid matrix ranking override only')
@@ -442,7 +441,10 @@ def main():
     if a.chunking is not None and a.scheme!='hybrid':p.error('--chunking is only applicable to hybrid')
     if (a.comparator!='hybrid' or a.matrix_backend!='auto') and (a.scheme!='hybrid' or a.scope!='full'):
         p.error('Explicit selection backend overrides currently require --scheme hybrid --scope full')
-    if not (0<a.lan_threshold<=2147483647 and 0<a.wan_threshold<=2147483647):p.error('hybrid thresholds must be positive 32-bit integers')
+    if a.lan_threshold!=DEFAULTS['LAN_THRESHOLD'] or a.wan_threshold!=DEFAULTS['WAN_THRESHOLD']:
+        p.error('Thresholds must match Machines/kona-bench-config.hpp; stale overrides are rejected')
+    if a.scheme!='hybrid' and any(flag.split('=',1)[0] in ['--lan-threshold','--wan-threshold'] for flag in sys.argv[1:]):
+        p.error('Threshold assertions are only applicable to hybrid')
     if a.scope=='topk' and (a.scheme!='kona' or a.kona_backend!='batched-dcf'):p.error('--scope topk requires --scheme kona --kona-backend batched-dcf')
     if a.scope=='topk-vote' and a.scheme!='shao':p.error('--scope topk-vote currently supports shao only')
     if a.scope=='vote' and a.scheme not in ['hybrid','constantpp']:p.error('--scope vote supports hybrid/constantpp')
@@ -594,6 +596,14 @@ for pid in matching():
                 effective_chunking=(a.chunking or MATRIX_CHUNKING_DEFAULT) if item['bench_scheme']=='hybrid' else 'on'
                 if meta.get('chunking')!=effective_chunking:
                     raise RuntimeError('Effective chunking differs from requested configuration')
+                if item['bench_scheme']=='hybrid' and item['scope']!='vote':
+                    threshold_profile='lan' if item['network_profile']=='native' else item['network_profile']
+                    if (meta.get('threshold_source')!='Machines/kona-bench-config.hpp' or
+                        meta.get('lan_threshold')!=str(DEFAULTS['LAN_THRESHOLD']) or
+                        meta.get('wan_threshold')!=str(DEFAULTS['WAN_THRESHOLD']) or
+                        meta.get('effective_threshold')!=str(DEFAULTS[threshold_profile.upper()+'_THRESHOLD']) or
+                        meta.get('threshold_override')!='0'):
+                        raise RuntimeError('Hybrid effective thresholds differ from shared configuration')
                 if item['scope']=='checkpoints':
                     actual_order=[int(v) for v in re.findall(r'^VOTE_EXECUTION k=(\d+) ',paths[party].read_text(),re.M)]
                     if actual_order!=list(map(int,item['ks'].split(','))):raise RuntimeError('Vote execution order differs from manifest')

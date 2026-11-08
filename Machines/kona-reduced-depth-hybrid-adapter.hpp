@@ -35,14 +35,14 @@ inline const char* backend_name(Backend b)
 
 struct Policy
 {
-    // Frozen provisional thresholds for this experiment.
+    // Shared formal thresholds; maintained entries reject conflicting CLI values.
     // Interpretation:
     //   comparators <= threshold -> DCF
     //   comparators >  threshold -> PCR
     size_t lan_threshold = KonaBenchConfig::LAN_THRESHOLD;
     size_t wan_threshold = KonaBenchConfig::WAN_THRESHOLD;
 
-    // Optional hard override. 0 means "use profile threshold".
+    // Component diagnostic override only. Formal knn-bench accepts only 0.
     size_t threshold_override = 0;
 
     // Diagnostic-only override for the matrix ranking stage.  AUTO preserves

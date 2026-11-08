@@ -25,7 +25,7 @@ struct ScopedChunking {
     ScopedChunking& operator=(const ScopedChunking&) = delete;
 };
 constexpr std::size_t LAN_THRESHOLD = 180;
-constexpr std::size_t WAN_THRESHOLD = 6000;
+constexpr std::size_t WAN_THRESHOLD = 26000;
 
 constexpr std::uint64_t chunks(std::uint64_t items, std::uint64_t limit) {
     return items / limit + (items % limit != 0);

@@ -1887,13 +1887,13 @@ void parse_argv(
             "-s", "--seed");
 
     opt.add(to_string(KonaBenchConfig::LAN_THRESHOLD).c_str(), 0, 1, 0,
-            "LAN comparator threshold; <= threshold uses DCF",
+            "LAN threshold assertion; must match shared config",
             "", "--lan-threshold");
     opt.add(to_string(KonaBenchConfig::WAN_THRESHOLD).c_str(), 0, 1, 0,
-            "WAN comparator threshold; <= threshold uses DCF",
+            "WAN threshold assertion; must match shared config",
             "", "--wan-threshold");
     opt.add("0", 0, 1, 0,
-            "Hard threshold override; 0 uses profile threshold",
+            "Legacy threshold assertion; only 0 is accepted",
             "", "--threshold");
     opt.add("auto", 0, 1, 0,
             "Matrix rank backend override: auto, dcf, or pcr",
@@ -1943,9 +1943,20 @@ void parse_argv(
     if (lan_threshold <= 0 || wan_threshold <= 0 || threshold_override < 0)
         throw runtime_error("thresholds must be positive; override may be zero");
 
-    policy.lan_threshold = static_cast<size_t>(lan_threshold);
-    policy.wan_threshold = static_cast<size_t>(wan_threshold);
-    policy.threshold_override = static_cast<size_t>(threshold_override);
+    // Formal thresholds have exactly one source. Accept matching legacy flags
+    // for compatibility, but reject stale launch commands before networking.
+    if (static_cast<size_t>(lan_threshold) != KonaBenchConfig::LAN_THRESHOLD ||
+            static_cast<size_t>(wan_threshold) != KonaBenchConfig::WAN_THRESHOLD ||
+            threshold_override != 0)
+        throw runtime_error("threshold override conflicts with Machines/kona-bench-config.hpp; "
+                "formal LAN=" + to_string(KonaBenchConfig::LAN_THRESHOLD) +
+                " WAN=" + to_string(KonaBenchConfig::WAN_THRESHOLD) + "; --threshold must be 0");
+    policy.lan_threshold = KonaBenchConfig::LAN_THRESHOLD;
+    policy.wan_threshold = KonaBenchConfig::WAN_THRESHOLD;
+    policy.threshold_override = 0;
+    cout << "threshold_source=Machines/kona-bench-config.hpp\nlan_threshold="
+         << policy.lan_threshold << "\nwan_threshold=" << policy.wan_threshold
+         << "\nthreshold_override=0\neffective_threshold=" << policy.threshold_for(profile) << '\n';
 
     if (matrix_backend_name == "auto")
         policy.matrix_backend_override = KonaReducedDepthHybrid::Backend::AUTO;
