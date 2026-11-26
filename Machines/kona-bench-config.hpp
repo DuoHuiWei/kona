@@ -25,6 +25,9 @@ struct ScopedChunking {
     ScopedChunking(const ScopedChunking&) = delete;
     ScopedChunking& operator=(const ScopedChunking&) = delete;
 };
+constexpr std::size_t SUPER_DC_THRESHOLD = 30;
+constexpr std::size_t MID_LAN_THRESHOLD = 750;
+constexpr std::size_t MID_WAN_THRESHOLD = 4000;
 constexpr std::size_t LAN_THRESHOLD = 180;
 constexpr std::size_t WAN_THRESHOLD = 26000;
 

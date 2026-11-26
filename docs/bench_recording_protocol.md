@@ -591,3 +591,100 @@ Kona 正式入口默认并显式传递 `--kona-backend batched-dcf`，默认 `--
 - Ours Dota2 WAN 一次：N=102943、k=5，WAN26000、chunk off，实际包含 PPC 和 DCF；完整在线双方最大值 14127.004992 ms，单方最大发送 37501366 B，理论／实际轮次 125／125。目录 `knn-hybrid-20261108T102419Z-47483`。
 - Kona Dota2 WAN 一次：batched-dcf、chunk off；完整在线双方最大值 22679.485772 ms，单方最大发送 37059288 B，理论／实际轮次 178／178。目录 `knn-kona-20261108T102458Z-47730`。
 - 上述目录均在 `KNN-experiment-res/`。每组双方正确性、通信核对、开始／结束网络检查通过，结束均清理网络并恢复 offload。它们是修复预检，不是六数据集各三次正式批次；单次和监控开关不同的结果不用于稳定性能结论。
+
+
+### 2026-11-08：表9四结构消融新版WAN补测
+
+`Scripts/run-topk-network-ablation.py` 复用共享严格网络校验，正式批次显式
+采用 serialized-v4，记录网络契约、前后及监控快照的双向 netem/HTB rate、
+delay、offload、版本及 pacing 检查。结果文字按实际 repeats 输出，不再写死三次。
+C++算法、比较器、swap、各结构投票及公共阶段复用不变。
+
+N16384、d32、4类，k3/5/10/20/50，四结构各2次、chunk off、CPU0/2，
+全部40个条件通过；18次严格网络检查通过，结束清理并恢复offload。
+理论轮次与真实交换次数相同，字节和轮次与旧结构计数一致；旧时间不覆盖。
+DQ/FullMat/PCM保留复用阶段合成时间，Merge为连续总段实测，均不计距离。
+DQ保留自身投票；Merge全入选优化投票；两矩阵为优化mask投票，不能标为投票实现完全相同。
+结果：`KNN-experiment-res/topk-network-ablation-20261108T112050Z-63026/results_zh.md`，
+同名zip保存双方日志、配置、执行顺序、各阶段字节和两种轮次。
+
+### 2026-11-08：表10矩阵-only新版LAN/WAN补测
+
+矩阵B扫描启动器已复用 `kona_network_validation.py`，显式采用serialized-v4，
+每组前后及监控快照检查双向netem/HTB速率、延迟、offload、版本和pacing；
+原始日志核对chunk开关。原矩阵、比较器、投票和候选生成逻辑不变。
+N32768/d32/k5/4类，B2/4/8/16/32，两方法LAN/WAN各2次、chunk off、CPU0/2。
+20组双方运行、40个方法条件完成，40次前后网络检查通过，结束清理并恢复offload。
+距离/Cong执行次数均为0；同一有序候选及份额在计时外准备。
+FullMat含块内的完整上三角：比较次数M(M+1)/2，M=5B；PCM为C(B,2)*15+5B。
+因此FullMat为55/210/820/3240/12880，PCM为25/110/460/1880/7600，均含阈值测试。
+矩阵时间含排名及阈值；末端选择＋投票独立连续测量，不包括块内Top-k。
+矩阵理论/真实均2/2，末端＋投票均8/8；LAN/WAN字节相同，全部固定DCF。
+结果及双方日志：`KNN-experiment-res/matrix-block-count-20261108T113010Z-64786/`，
+`results_zh.md`包含秒单位的表10、标准差与字节，同名zip包含全部记录。
+
+### 2026-11-08：表11固定Local+PCM比较器后端消融（已写，未运行协议）
+
+新增且仅新增一个独立bench和一个组织脚本：
+`Machines/pcm-backend-ablation-bench.cpp`、`Scripts/run-pcm-backend-ablation.py`。
+无Makefile修改；沿用通用目标 `pcm-backend-ablation-bench.x`。
+五档阈值统一在 `Machines/kona-bench-config.hpp`：Super-DC30、LAN180、
+Mid-LAN750、Mid-WAN4000、WAN26000。后三个新增档位由用户明确确认；
+Policy补充这三档的解析，原LAN/WAN行为及参数不变，不复制阈值字面量到启动器。
+
+固定N16384、d32、k20、4类，复用原块内Cong＋PCM网络、比较器和swap。
+所有模式均关闭通信chunk；固定DCF、固定PPC和Hybrid只切换选择阶段后端，
+包括块内Cong、PCM排名和rank-mask；安全投票统一直接调用vote_dcf_optimized，
+始终优化批量DCF。与“矩阵-only固定DCF”的表10是不同消融范围。
+时间从准备好的秘密距离/标签开始，连续覆盖选择＋投票，到预测标签份额产生。
+不执行距离协议、不计离线/输入提交；不引入热连接、弃首、未来共同起跑或层间同步。
+
+默认五profile×三mode×两次=30组双方运行，轮换profile起点和mode顺序，固定CPU0/2。
+每组保存两方原始日志、层宽/后端/实际顺序、阶段与独立总段时间、字节、理论及真实
+轮次；采样和前后网络检查采用共享serialized-v4契约，CPU4诊断快照。
+时间与字节逐次取双方最大值后统计均值/中位数/样本标准差/CV；计数保留双方。
+构建、输入、材料与源码身份核对；失败不重试，保留部分结果并清除整形、恢复offload。
+
+表11的DCF/PPC“调用次数”默认定义为Hybrid选择阶段逻辑比较项数，不含固定投票，
+不是层批次数或底层DCF evaluate次数。三种量及投票比较项在原日志和backend_counts.csv
+分别保存；layer_trials.csv记录各层宽度和分流，以便独立检查阈值切换。
+主表时间包含固定DCF投票，计数列排除投票时必须保留此说明。
+
+只读规划检查：B=4，候选数80，最大逻辑层8192，选择总比较项126012。
+Hybrid分流（DCF/PPC比较项）：Super-DC24/125988、LAN1552/124460、
+Mid-LAN6736/119276、Mid-WAN28732/97280、WAN126012/0。
+WAN阈值26000超过本规模所有层宽，因此Hybrid退化为全DCF是预期行为，
+不能为了出现切换而改网络、阈值或数据；表中时间仍须未来实测，不能直接填理论值。
+
+本轮完成C++编译、Python语法与dry-run顺序/阈值检查、C++ --describe只读规划、
+未知参数/旧阈值拒绝检查；没有建立双服务器连接，没有运行协议或采集性能时间。
+
+### 2026-11-08：表11五档正式两次已完成
+
+在小规模N256、Super-DC/WAN策略各三种mode的无整形功能回归通过后，正式执行
+`Scripts/run-pcm-backend-ablation.py --repeats 2`。30组双方运行全部完成，
+正确性、逐层分流、通信字节、理论/实际轮次与输入/构建/材料身份核对通过；
+60次运行前后网络校验通过，结束清理整形并恢复offload，总墙钟约196秒。
+所有mode的选择比较总项数126012，固定投票243项DCF；Hybrid选择分流与静态规划一致。
+WAN Hybrid没有PPC，字节和轮次与固定DCF一致，时间差不能当作操作数减少。
+Super-DC固定PPC/Hybrid均值接近，仅2次不能断言稳定优劣。
+结果：`KNN-experiment-res/pcm-backend-ablation-20261108T115744Z-69139/`，
+`results_zh.md`包含表11、两次原值和标准差、各mode通信字节和两种轮次；同名zip
+包含双方原始日志、层宽/后端、执行顺序及全部计量记录。没有改阈值、剔样或重跑。
+
+### 2026-11-08：表12新版WAN，Kona/Ours四规模各两次
+
+固定N1024/4096/16384/65536、d32/k5/4类，完整N训练＋独立1查询；
+同一存量合成数据，新旧两方案四规模的输入指纹均一致。WAN40Mbps/方向、
+单程20ms、serialized-v4，monitor开启、CPU0/2，chunk off；Ours阈值26000，
+Kona batched-dcf。先Ours后Kona，每轮轮换规模起点，各2次，共16组全部通过。
+32次前后网络检查通过，结束清理整形和恢复offload；B分别2/4/8/16。
+完整在线两次相对差max：Kona0.480%、Ours0.583%，全部保留，不剔样或补跑。
+与旧记录比较只对齐相同阶段：旧Kona是Top-k-only，因此只比较新旧Top-k，
+变化+4.31%/+12.36%/+27.47%/+37.93%；Ours已有旧连续完整在线，变化
++4.52%/+12.23%/+34.96%/+33.10%。网络、chunk及Ours阈值发生变化，
+跨配置/跨日期差异不能当作同条件算法退化结论，不自动改阈值。
+Kona Top-k字节和理论轮次不变；N65536实际交换由185降到160（Top-k阶段）。
+SecKNN等其他方案未运行。新结果、逐阶段及旧值对比：
+`KNN-experiment-res/nscale-kona-ours-v4-20261108T132220Z/tables.md`；同名zip保存
+双方日志、全部阶段计量、网络证据、原始两次值及旧summary参考。

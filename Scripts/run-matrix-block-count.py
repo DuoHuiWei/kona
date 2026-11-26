@@ -22,6 +22,8 @@
 # DCF/PCR comparator counts are retained. Counter closure is checked by party.
 # Existing L2 test material and cached DCF keys; no real offline claim/keygen.
 # Existing kona-dev only; sync/build existing generic target, no Makefile edits.
+# Network uses serialized-v4; shared strict validator checks BOTH netem/HTB
+# rates, delay, offload and version/pacing before/after and monitor snapshots.
 # Probe BOTH rate lanes/RTT once per profile BEFORE protocols; never overlap
 # probe traffic with timing. Poll tc/TCP/process/RSS every15s on observerCPU4.
 # Freeze sources/binary/keys, preserve execution order and failures, no retry.
@@ -46,13 +48,14 @@ import time
 import uuid
 
 ROOT=Path(__file__).resolve().parents[1];REMOTE='/usr/src/Garnet'
+from kona_network_validation import network_contract, check_network
 TARGET='matrix-block-count-bench.x';METHODS=['FullMat','PCM'];BLOCKS=[2,4,8,16,32]
 PHASES=['rank_matrix','rank_mask','matrix_other','matrix','vote','online_other','matrix_vote_online']
 METRICS=['online_ms','sent_bytes','transport_actions','exchange_rounds','theoretical_rounds','dcf_evaluate_calls','comparators','dcf_comparators','pcr_comparators']
 def docker(*args):return sp.check_output(['docker','exec','kona-dev',*args],text=True)
 def sources():
     files=['Machines/matrix-block-count-bench.cpp','Scripts/run-matrix-block-count.py','Makefile',
-        'Scripts/codex-container-build.sh','Scripts/container-network.sh','Scripts/kona-bench-log.sh','Scripts/measure-container-profile-throughput.py',
+        'Scripts/codex-container-build.sh','Scripts/container-network.sh','Scripts/kona-bench-log.sh','Scripts/measure-container-profile-throughput.py','Scripts/kona_network_validation.py',
         'Tools/octetStream.h','Tools/octetStream.cpp']
     files += [str(p.relative_to(ROOT)) for p in (ROOT/'Machines').glob('kona-*.hpp')]
     files += [str(p.relative_to(ROOT)) for pattern in ['*.h','*.cpp'] for p in (ROOT/'Networking').glob(pattern)]
@@ -72,7 +75,7 @@ def parse(text):
                 if key in phases:raise RuntimeError('duplicate phase')
                 phases[key]=r
     return meta,phases,cases
-def collect(texts,b,trial,profile,info):
+def collect(texts,b,trial,profile,info,chunking):
     parsed=[parse(t) for t in texts];rows=[];cases=[]
     for party,(meta,phases,case) in enumerate(parsed):
         assert set(phases)=={(m,p) for m in METHODS for p in PHASES}
@@ -83,6 +86,7 @@ def collect(texts,b,trial,profile,info):
         assert meta['vote_backend']=='DCF_OPTIMIZED' and meta['fullmat_backend']=='DCF' and meta['pcm_backend']=='DCF'
         assert meta['test_status']=='COMPLETED' and info['binary_sha256'] in texts[party]
         assert meta['network_profile']==profile
+        assert meta['chunking']==chunking,'Effective chunk setting mismatch'
         for r in case:
             assert (int(r['B']),int(r['trial']),r['profile'],int(r['party']))==(b,trial,profile,party)
             rank_pairs=b*5*(b*5-1)//2 if r['method']=='FullMat' else b*(b-1)//2*15
@@ -149,17 +153,19 @@ def main():
     if any(len(x)!=len(set(x)) for x in [a.blocks,a.profiles,a.methods]):parser.error('duplicate block/profile/method')
     METHODS=a.methods
     if a.smoke:a.repeats=1
+    contracts={} if a.smoke else {profile:network_contract(profile,'serialized') for profile in a.profiles}
+    if any(not c['version'].endswith('-serialized-v4') for c in contracts.values()):parser.error('Formal matrix sweep requires serialized-v4')
     blocks=[2,32] if a.smoke else a.blocks
     jobs=[]
     for trial in range(1,a.repeats+1):
         shift=(trial-1)%len(blocks)
         for i,b in enumerate(blocks[shift:]+blocks[:shift]):
             for profile in a.profiles:jobs.append(dict(B=b,trial=trial,profile=profile,order=','.join(METHODS if (trial+i)%2 else list(reversed(METHODS)))))
-    if a.dry_run:print(json.dumps(dict(chunking=a.chunking,N=32768,d=32,k=5,classes=4,pairs=len(jobs),cases=len(METHODS)*len(jobs),smoke=a.smoke,schedule=jobs,comparison_policy='fixed DCF rank/mask/vote'),indent=2));return
+    if a.dry_run:print(json.dumps(dict(network_contracts=contracts,network_pacing='unshaped' if a.smoke else 'serialized',chunking=a.chunking,N=32768,d=32,k=5,classes=4,pairs=len(jobs),cases=len(METHODS)*len(jobs),smoke=a.smoke,schedule=jobs,comparison_policy='fixed DCF rank/mask/vote'),indent=2));return
     lock=open('/tmp/kona-bench-experiment.lock','a+');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ');out=ROOT/'KNN-experiment-res'/('matrix-block-count-'+('smoke-' if a.smoke else '')+stamp+'-'+str(os.getpid()))
     out.mkdir();(out/'raw').mkdir();print('RESULT_DIRECTORY='+str(out),flush=True)
-    baseline=sources();manifest=dict(chunking=a.chunking,N=32768,d=32,k=5,classes=4,seed=20261105,smoke=a.smoke,schedule=jobs,source_sha256=baseline,
+    baseline=sources();manifest=dict(network_contracts=contracts,network_pacing='unshaped' if a.smoke else 'serialized',chunking=a.chunking,N=32768,d=32,k=5,classes=4,seed=20261105,smoke=a.smoke,schedule=jobs,source_sha256=baseline,
         comparison_policy=dict(FullMat='DCF',PCM='DCF',rank_mask='DCF'),methods=METHODS,vote='DCF_OPTIMIZED_MASK',cpu=[0,2],core_exclusivity='NOT_VERIFIED')
     env=dict(os.environ,KONA_NETWORK_PRIVILEGED='1');rows=[];cases=[];original=None;touched=False;failure=None;done=0;procs=[];handles=[];marker=out.name;started=time.monotonic()
     def save(): (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
@@ -168,17 +174,19 @@ def main():
     signal.signal(signal.SIGINT,stop);signal.signal(signal.SIGTERM,stop)
     def frozen():
         if sources()!=baseline:raise RuntimeError('Measured source changed')
+    network_checks=[];applied_profiles={}
     def snapshot(name,profile):
         text=docker('taskset','-c','4','bash','-lc','tc qdisc show dev lo; tc class show dev lo; tc -s class show dev lo; ethtool -k lo; ss -tin; ps -eo pid,psr,comm,rss,stat,args; free -k')
         (out/(name+'.log')).write_text(text)
         if not a.smoke:
-            rate='1Gbit' if profile=='lan' else '40Mbit'
-            for leaf in ['10','20']:assert re.search(r'class htb 1:'+leaf+r' .*?rate '+rate,text)
-            if profile=='wan':assert len(re.findall(r'qdisc netem (?:10:|20:).*?delay 20ms',text))==2
-            else:
-                delays=re.findall(r'^qdisc netem (?:10:|20:)[^\n]*?delay ([0-9.]+)(us|ms|s)',text,re.M)
-                assert len(delays)==2 and all(abs(float(v)*{'us':1,'ms':1000,'s':1000000}[unit]-500)<=2 for v,unit in delays)
-            for name in ['tcp-segmentation-offload','generic-segmentation-offload','generic-receive-offload']:assert re.search(r'^'+name+r': off',text,re.M)
+            try:
+                result=check_network(text,profile,'serialized',applied_profiles[profile],contracts[profile])
+            except RuntimeError as error:
+                network_checks.append(dict(boundary=name,status='FAILED',error=str(error)))
+                (out/'network-validation.json').write_text(json.dumps(network_checks,indent=2)+'\n')
+                raise
+            network_checks.append(dict(boundary=name,status='PASS',**result))
+            (out/'network-validation.json').write_text(json.dumps(network_checks,indent=2)+'\n')
     try:
         with (out/'build.log').open('w') as log:
             sp.run(['bash','Scripts/codex-container-build.sh'],check=True,stdout=log,stderr=sp.STDOUT)
@@ -202,7 +210,8 @@ print(json.dumps(dict(runtime=str(runtime),key_source=str(keys),key_sha256={f:ha
             frozen();print(f'START {sequence}/{len(jobs)} {label}',flush=True)
             if not a.smoke:
                 touched=True
-                with (out/(label+'-network.log')).open('w') as log:sp.run(['bash','Scripts/container-network.sh',profile,'lo'],env=env,check=True,stdout=log,stderr=sp.STDOUT)
+                with (out/(label+'-network.log')).open('w') as log:sp.run(['bash','Scripts/container-network.sh',profile,'lo','--pacing','serialized'],env=env,check=True,stdout=log,stderr=sp.STDOUT)
+                applied_profiles[profile]=(out/(label+'-network.log')).read_text()
                 if profile not in probed:
                     remote=info['runtime']+'/probe-'+profile+'.json'
                     with (out/('probe-'+profile+'.log')).open('w') as log:sp.run(['docker','exec','kona-dev','taskset','-c','4','python3',REMOTE+'/Scripts/measure-container-profile-throughput.py','--profile',profile,'--base','42000','--mib','64','--samples','10','--json-output',remote],check=True,stdout=log,stderr=sp.STDOUT,timeout=180)
@@ -228,7 +237,7 @@ print(json.dumps(dict(runtime=str(runtime),key_source=str(keys),key_sha256={f:ha
             if any(codes):raise RuntimeError(label+' exits '+str(codes))
             snapshot(label+'-after',profile);frozen()
             texts=[(out/'raw'/f'{label}-P{p}.log').read_text() for p in [0,1]]
-            new_rows,new_cases=collect(texts,b,trial,profile,info)
+            new_rows,new_cases=collect(texts,b,trial,profile,info,a.chunking)
             meta=parse(texts[0])[0]
             if fixture is None:fixture=meta['fixture_checksum']
             assert meta['fixture_checksum']==fixture

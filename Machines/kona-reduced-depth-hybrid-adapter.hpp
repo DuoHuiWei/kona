@@ -61,8 +61,11 @@ struct Policy
             return lan_threshold;
         if (profile == "wan")
             return wan_threshold;
+        if (profile == "super-dc") return KonaBenchConfig::SUPER_DC_THRESHOLD;
+        if (profile == "mid-lan") return KonaBenchConfig::MID_LAN_THRESHOLD;
+        if (profile == "mid-wan") return KonaBenchConfig::MID_WAN_THRESHOLD;
         throw std::invalid_argument(
-                "hybrid profile must be lan or wan, got: " + profile);
+                "unknown hybrid profile: " + profile);
     }
 
     Backend choose(size_t comparator_count, const std::string& profile) const

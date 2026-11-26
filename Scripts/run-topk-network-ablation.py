@@ -30,6 +30,8 @@
 # Benchmark copies/graphs/fixture setup/barriers/reveals/logging/launcher/probes
 # are outside reported online intervals. Existing L2 security limits persist.
 # Build/sync once using kona-dev, no new images/deps/Makefile edits/keygen.
+# Formal network is serialized-v4; shared strict validator checks both HTB/netem
+# rates, delay, offload and version/pacing before/after and at monitor snapshots.
 # Throughput/RTT probe runs BEFORE protocols, never concurrent with timings.
 # Read-only network/process sampling every 15s runs on observer CPU4. No auto
 # retries or outlier removal. Stop on mismatch, retain partial logs; clear tc
@@ -55,6 +57,7 @@ import uuid
 ROOT=Path(__file__).resolve().parents[1]
 REMOTE='/usr/src/Garnet'
 TARGET='topk-network-ablation-bench.x'
+from kona_network_validation import network_contract, check_network
 NAMES=['DQ','Merge','FullMat','PCM']
 KS=[3,5,10,20,50]
 METRICS=['online_ms','sent_bytes','transport_actions','exchange_rounds','theoretical_rounds','dcf_evaluate_calls','comparators','swaps']
@@ -64,7 +67,7 @@ def docker(*args,**kw):
 
 def sources():
     files=['Machines/topk-network-ablation-bench.cpp','Scripts/run-topk-network-ablation.py',
-        'Scripts/codex-container-build.sh','Scripts/container-network.sh','Scripts/kona-bench-log.sh',
+        'Scripts/codex-container-build.sh','Scripts/container-network.sh','Scripts/kona-bench-log.sh','Scripts/kona_network_validation.py',
         'Scripts/measure-container-profile-throughput.py','Makefile',
         'ConstantPP/data-loader.hpp','ConstantPP/data-loader.cpp']
     files += [str(p.relative_to(ROOT)) for p in (ROOT/'Machines').glob('kona-*.hpp')]
@@ -160,7 +163,7 @@ def summarize(out,texts,repeats,n):
             rounds.append(str(r[name+'_P0_theoretical_rounds']))
         table.append(r);lines.append('| '+' | '.join([str(k)]+times+rounds)+' |')
     csv_write(out/'table9.csv',table)
-    lines += ['', '时间每次先在同方合成，再取双方较大值；三次均值。DQ及矩阵方案为复用阶段合成，Merge为连续总段实测。未计距离。',
+    lines += ['', f'时间每次先在同方合成，再取双方较大值；{repeats}次均值。DQ及矩阵方案为复用阶段合成，Merge为连续总段实测。未计距离。',
         '主表轮次为理论逻辑轮次；table9.csv及phase_trials.csv另保留P0/P1实际交换次数、方向动作、字节与阶段时间。',
         'DQ保留自身投票和平局规则；Merge为全入选优化投票，FullMat/PCM共用mask投票。不是相同投票实现的纯选择网络计时。']
     (out/'table9.md').write_text('\n'.join(lines)+'\n')
@@ -173,8 +176,10 @@ def main():
     a=parser.parse_args();os.chdir(ROOT)
     if a.repeats<1 or a.timeout<1:parser.error('positive repeats/timeout required')
     if a.smoke:a.repeats=1
+    contract=None if a.smoke else network_contract('wan','serialized')
+    if contract is not None and not contract['version'].endswith('-serialized-v4'):parser.error('Formal ablation requires serialized-v4')
     if a.dry_run:
-        print(json.dumps(dict(chunking=a.chunking,N=64 if a.smoke else 16384,d=32,classes=4,ks=KS,repeats=a.repeats,
+        print(json.dumps(dict(network_contract=contract,network_pacing='unshaped' if a.smoke else 'serialized',chunking=a.chunking,N=64 if a.smoke else 16384,d=32,classes=4,ks=KS,repeats=a.repeats,
             wan_rate_per_direction_mbps=None if a.smoke else 40,one_way_delay_ms=None if a.smoke else 20,
             cases=20*a.repeats,DQ_max_k_chains=a.repeats,matrix_block_executions=5*a.repeats,cpu=[0,2],
             headline='DQ/matrices composed shared stages; Merge continuous'),indent=2));return
@@ -183,7 +188,7 @@ def main():
     out=ROOT/'KNN-experiment-res'/('topk-network-ablation-'+('smoke-' if a.smoke else '')+stamp+'-'+str(os.getpid()))
     out.mkdir();print('RESULT_DIRECTORY='+str(out),flush=True)
     baseline=sources();env=dict(os.environ,KONA_NETWORK_PRIVILEGED='1');marker=out.name
-    manifest=dict(chunking=a.chunking,command=os.sys.argv,source_sha256=baseline,ks=KS,repeats=a.repeats,smoke=a.smoke,N=64 if a.smoke else 16384,
+    manifest=dict(network_contract=contract,network_pacing='unshaped' if a.smoke else 'serialized',chunking=a.chunking,command=os.sys.argv,source_sha256=baseline,ks=KS,repeats=a.repeats,smoke=a.smoke,N=64 if a.smoke else 16384,
         cpu_affinity=[0,2],core_exclusivity='NOT_VERIFIED',network='unshaped-smoke' if a.smoke else 'WAN40Mbps/direction20ms',
         reuse=dict(DQ='one max50 chain/repetition',matrices='one block execution/k/repetition'),expected_cases=20*a.repeats)
     (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
@@ -192,14 +197,19 @@ def main():
     signal.signal(signal.SIGINT,stop);signal.signal(signal.SIGTERM,stop)
     def frozen():
         if sources()!=baseline:raise RuntimeError('Measured source changed; refusing mixed versions')
+    network_checks=[]
     def snapshot(name):
         text=docker('taskset','-c','4','bash','-lc','tc qdisc show dev lo; tc class show dev lo; tc -s class show dev lo; ethtool -k lo; ss -tin; ps -eo pid,psr,comm,rss,stat,args; free -k')
         (out/(name+'.log')).write_text(text)
         if not a.smoke:
-            assert re.search(r'class htb 1:10 .*?rate 40Mbit',text) and re.search(r'class htb 1:20 .*?rate 40Mbit',text)
-            assert len(re.findall(r'qdisc netem (?:10:|20:).*?delay 20ms',text))==2
-            for name in ['tcp-segmentation-offload','generic-segmentation-offload','generic-receive-offload']:
-                assert re.search(r'^'+name+r': off',text,re.M)
+            try:
+                result=check_network(text,'wan','serialized',(out/'network-apply.log').read_text(),contract)
+            except RuntimeError as error:
+                network_checks.append(dict(boundary=name,status='FAILED',error=str(error)))
+                (out/'network-validation.json').write_text(json.dumps(network_checks,indent=2)+'\n')
+                raise
+            network_checks.append(dict(boundary=name,status='PASS',**result))
+            (out/'network-validation.json').write_text(json.dumps(network_checks,indent=2)+'\n')
         return text
     try:
         with (out/'build.log').open('w') as log:
@@ -225,7 +235,7 @@ print(json.dumps(dict(runtime=str(runtime),key_source=str(keys),key_sha256={f:ha
         (out/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
         if not a.smoke:
             touched=True
-            with (out/'network-apply.log').open('w') as log:sp.run(['bash','Scripts/container-network.sh','wan','lo'],env=env,check=True,stdout=log,stderr=sp.STDOUT)
+            with (out/'network-apply.log').open('w') as log:sp.run(['bash','Scripts/container-network.sh','wan','lo','--pacing','serialized'],env=env,check=True,stdout=log,stderr=sp.STDOUT)
             with (out/'network-probe.log').open('w') as log:
                 probe_path=info['runtime']+'/network-probe.json'
                 sp.run(['docker','exec','kona-dev','taskset','-c','4','python3',REMOTE+'/Scripts/measure-container-profile-throughput.py','--profile','wan','--base','42000','--mib','64','--samples','10','--json-output',probe_path],check=True,stdout=log,stderr=sp.STDOUT,timeout=180)
@@ -260,6 +270,7 @@ print(json.dumps(dict(runtime=str(runtime),key_source=str(keys),key_sha256={f:ha
         assert key_hashes==info['key_sha256'],'DCF material changed during run'
         for party,text in enumerate(texts):
             assert f'BENCH_AFFINITY party={party} cpu={0 if party==0 else 2} source=cpp_bench affinity_check=PASS' in text
+            assert re.search(r'^chunking='+a.chunking+r'$',text,re.M),'Effective chunk setting mismatch'
             assert 'reuse_common=1' in text and 'test_status=COMPLETED' in text and 'backend=DCF_ONLY' in text
             for field,value in [('train_count',64 if a.smoke else 16384),('features',32),('public_label_domain',4)]:
                 assert re.search(r'^'+field+'='+str(value)+r'$',text,re.M),'Wrong '+field

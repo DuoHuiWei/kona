@@ -300,7 +300,7 @@ def schedule(a):
                 for profile in a.profiles:add('vote','vote',k,profile,trial,order)
         return jobs
     if a.scope=='topk-vote':
-        # Missing Shao k points only: never schedule NHSS distance here.
+        # Shao missing points or native SecKNN shared tail: no distance here.
         for trial in range(1,a.repeats+1):
             offset=(trial-1)%len(a.ks);order=a.ks[offset:]+a.ks[:offset]
             for k in order:
@@ -373,7 +373,7 @@ def expected(a,item):
     if scope=='pre-vote':return {(p,k) for p in ['distance','shuffle','rank_matrix','threshold','indicator_select','online_other','pre_vote_online']}
     if scope=='checkpoints':return {(p,k) for k in a.ks for p in ['topk','vote_frequency','vote_max','vote']}
     if scope=='shared':return {(p,k) for k in a.ks for p in ['block_cong','terminal','topk','vote']}
-    if scope=='topk-vote' and a.scheme=='shao':return {(p,k) for p in ['topk','vote_frequency','vote_max','vote','online_other','topk_vote_online']}
+    if scope=='topk-vote' and a.scheme in ['shao','secknn']:return {(p,k) for p in ['topk','vote_frequency','vote_max','vote','online_other','topk_vote_online']}
     stages=['distance','topk','vote','online_other','knn_online']
     if a.scheme=='hybrid':stages += ['block_cong','terminal','topk_other']
     if a.scheme=='shao':stages += ['vote_frequency','vote_max']
@@ -446,7 +446,7 @@ def main():
     if a.scheme!='hybrid' and any(flag.split('=',1)[0] in ['--lan-threshold','--wan-threshold'] for flag in sys.argv[1:]):
         p.error('Threshold assertions are only applicable to hybrid')
     if a.scope=='topk' and (a.scheme!='kona' or a.kona_backend!='batched-dcf'):p.error('--scope topk requires --scheme kona --kona-backend batched-dcf')
-    if a.scope=='topk-vote' and a.scheme!='shao':p.error('--scope topk-vote currently supports shao only')
+    if a.scope=='topk-vote' and a.scheme not in ['shao','secknn']:p.error('--scope topk-vote supports shao or native secknn')
     if a.scope=='vote' and a.scheme not in ['hybrid','constantpp']:p.error('--scope vote supports hybrid/constantpp')
     if a.profiles is None:a.profiles=['wan'] if a.scheme=='shao' else ['lan','wan']
     if a.monitor and any(p not in ['lan','wan'] for p in a.profiles):p.error('--monitor requires lan/wan profiles')
@@ -649,7 +649,7 @@ for pid in matching():
                 if actual!=info['dataset_files_sha256']:raise RuntimeError('Dataset changed')
                 if item['scope']=='full':check_closure(phases,'knn_online',['distance','topk','vote','online_other'],item['k'])
                 if a.scheme=='hybrid' and item['scope']=='full':check_closure(phases,'topk',['block_cong','terminal','topk_other'],item['k'])
-                if a.scheme=='shao' and item['scope']!='distance':
+                if a.scheme in ['shao','secknn'] and item['scope'] in ['full','topk-vote']:
                     check_closure(phases,'vote',['vote_frequency','vote_max'],item['k'])
                     if item['scope']=='topk-vote':check_closure(phases,'topk_vote_online',['topk','vote','online_other'],item['k'])
                 if item['scope']=='pre-vote':check_closure(phases,'pre_vote_online',['distance','shuffle','rank_matrix','threshold','indicator_select','online_other'],item['k'])
