@@ -234,6 +234,18 @@ inline bool should_cancel_outer_partition(int k, int candidate_lmax)
     return std::uint64_t(k) * 4 > std::uint64_t(candidate_lmax);
 }
 
+inline void append_cong_block(NetworkPlan& plan, int begin, int length)
+{
+    BlockPlan block;
+    block.real_begin = begin;
+    block.real_size = block.padded_size = length;
+    block.keep = std::min(plan.k, length);
+    block.network = KonaCongTopK::build_cong_network(length, block.keep);
+    plan.block_comparators += comparator_count(block.network);
+    plan.block_depth = std::max(plan.block_depth, block.network.levels.size());
+    plan.blocks.push_back(std::move(block));
+}
+
 inline NetworkPlan build_reduced_depth_cong_plan(int n, int k)
 {
     if (n <= 0)
@@ -272,13 +284,7 @@ inline NetworkPlan build_reduced_depth_cong_plan(int n, int k)
         plan.outer_partition_cancelled = true;
         plan.q = 1;
         plan.r = 0;
-        BlockPlan block;
-        block.real_size = block.padded_size = n;
-        block.keep = k;
-        block.network = KonaCongTopK::build_cong_network(n, k);
-        plan.block_comparators = comparator_count(block.network);
-        plan.block_depth = block.network.levels.size();
-        plan.blocks.push_back(std::move(block));
+        append_cong_block(plan, 0, n);
         // Only output metadata: no quadratic matrix/index construction.
         plan.matrix.candidate_count = plan.matrix.output_k = k;
         for (int i = 0; i < k; ++i) {
@@ -298,41 +304,13 @@ inline NetworkPlan build_reduced_depth_cong_plan(int n, int k)
 
     for (int i = 0; i < plan.q; ++i)
     {
-        BlockPlan block;
-        block.real_begin = cursor;
-        block.real_size = plan.lmax;
-        block.padded_size = plan.lmax;
-        block.keep = std::min(k, block.real_size);
-
-        const int network_k = std::min(k, block.padded_size);
-        block.network =
-            KonaCongTopK::build_cong_network(block.padded_size, network_k);
-
-        plan.block_comparators += comparator_count(block.network);
-        plan.block_depth = std::max(
-            plan.block_depth, block.network.levels.size());
-
-        plan.blocks.push_back(std::move(block));
+        append_cong_block(plan, cursor, plan.lmax);
         cursor += plan.lmax;
     }
 
     if (plan.r > 0)
     {
-        BlockPlan tail;
-        tail.real_begin = cursor;
-        tail.real_size = plan.r;
-        tail.padded_size = tail.real_size;
-        tail.keep = std::min(k, tail.real_size);
-
-        const int network_k = std::min(k, tail.real_size);
-        tail.network =
-            KonaCongTopK::build_cong_network(tail.real_size, network_k);
-
-        plan.block_comparators += comparator_count(tail.network);
-        plan.block_depth = std::max(
-            plan.block_depth, tail.network.levels.size());
-
-        plan.blocks.push_back(std::move(tail));
+        append_cong_block(plan, cursor, plan.r);
         cursor += plan.r;
     }
 
@@ -389,24 +367,14 @@ struct PreparedReducedPlan
     KonaOrderedBlockTerminal::TerminalNetwork octm;
 };
 
-inline PreparedReducedPlan prepare_reduced_plan(int n, int k)
+inline void prepare_block_levels(PreparedReducedPlan& prepared)
 {
-    PreparedReducedPlan prepared;
-    prepared.plan =
-            KonaReducedDepthCongTopK::build_reduced_depth_cong_plan(n, k);
-
     int offset = 0;
     for (const auto& block : prepared.plan.blocks)
     {
         prepared.block_offsets.push_back(offset);
         offset += block.padded_size;
     }
-    prepared.candidate_block = prepared.plan.matrix.candidate_block;
-    prepared.candidate_pos = prepared.plan.matrix.candidate_position;
-    prepared.initial_rank = prepared.candidate_pos;
-    for (auto& x : prepared.initial_rank)
-        --x;
-
     prepared.fused_block_levels.resize(prepared.plan.block_depth);
     for (size_t depth = 0; depth < prepared.plan.block_depth; ++depth)
     {
@@ -425,6 +393,19 @@ inline PreparedReducedPlan prepare_reduced_plan(int n, int k)
             }
         }
     }
+
+}
+
+inline PreparedReducedPlan prepare_reduced_plan(int n, int k)
+{
+    PreparedReducedPlan prepared;
+    prepared.plan = build_reduced_depth_cong_plan(n, k);
+    prepare_block_levels(prepared);
+    prepared.candidate_block = prepared.plan.matrix.candidate_block;
+    prepared.candidate_pos = prepared.plan.matrix.candidate_position;
+    prepared.initial_rank = prepared.candidate_pos;
+    for (auto& x : prepared.initial_rank)
+        --x;
 
     if (prepared.plan.outer_partition_cancelled)
         return prepared;
@@ -548,7 +529,13 @@ inline vector<SharePair<K>> collect_block_candidates(
     return candidates;
 }
 
-template<int K>
+struct DirectCompare
+{
+    template<class Operation>
+    Backend operator()(Operation&& operation) const { return operation(); }
+};
+
+template<int K, class MeasureCompare = DirectCompare>
 inline KonaReducedDepthHybrid::Backend secure_matrix_rank_hybrid(
         const vector<SharePair<K>>& candidates,
         const vector<int>& matrix_idx,
@@ -557,7 +544,7 @@ inline KonaReducedDepthHybrid::Backend secure_matrix_rank_hybrid(
         const string& profile,
         const KonaReducedDepthHybrid::Policy& policy,
         KonaDcfCompare::Compare64<K>& dcf,
-        RealTwoPartyPlayer* player)
+        RealTwoPartyPlayer* player, MeasureCompare measure_compare = {})
 {
     const int playerno = player->my_num();
     const int m = (int)candidates.size();
@@ -578,9 +565,11 @@ inline KonaReducedDepthHybrid::Backend secure_matrix_rank_hybrid(
 
     vector<Z2<K>> compare_res(matrix_idx.size());
 
-    const auto backend = KonaReducedDepthHybrid::compare_pairs<K>(
-            candidates, matrix_idx, compare_res, true,
-            profile, policy, dcf, player, policy.matrix_backend_override);
+    const auto backend = measure_compare([&] {
+        return KonaReducedDepthHybrid::compare_pairs<K>(
+                candidates, matrix_idx, compare_res, true,
+                profile, policy, dcf, player, policy.matrix_backend_override);
+    });
 
     const Z2<K> one =
             playerno == 0 ? Z2<K>(0) :
@@ -599,7 +588,7 @@ inline KonaReducedDepthHybrid::Backend secure_matrix_rank_hybrid(
     return backend;
 }
 
-template<int K>
+template<int K, class MeasureCompare = DirectCompare>
 inline KonaReducedDepthHybrid::Backend topk_mask_from_rank_hybrid(
         const vector<Z2<K>>& rank_share,
         int k,
@@ -607,7 +596,7 @@ inline KonaReducedDepthHybrid::Backend topk_mask_from_rank_hybrid(
         const string& profile,
         const KonaReducedDepthHybrid::Policy& policy,
         KonaDcfCompare::Compare64<K>& dcf,
-        RealTwoPartyPlayer* player)
+        RealTwoPartyPlayer* player, MeasureCompare measure_compare = {})
 {
     const int playerno = player->my_num();
     const int m = (int)rank_share.size();
@@ -627,9 +616,11 @@ inline KonaReducedDepthHybrid::Backend topk_mask_from_rank_hybrid(
     }
 
     vector<Z2<K>> duplicated(2 * m);
-    const auto backend = KonaReducedDepthHybrid::compare_values<K>(
-            values, idx, duplicated, false,
-            profile, policy, dcf, player);
+    const auto backend = measure_compare([&] {
+        return KonaReducedDepthHybrid::compare_values<K>(
+                values, idx, duplicated, false,
+                profile, policy, dcf, player);
+    });
 
     mask.resize(m);
     for (int i = 0; i < m; ++i)
@@ -793,10 +784,10 @@ struct Output
     string output_scope;
 };
 
-template<int K, class Observer>
+template<int K, class Observer, class ExecuteLayer>
 void execute_blocks(vector<SharePair<K>>& work, const PreparedReducedPlan& plan,
         const string& profile, const Policy& policy, KonaDcfCompare::Compare64<K>& dcf,
-        RealTwoPartyPlayer* player, Observer&& observe)
+        RealTwoPartyPlayer* player, Observer&& observe, ExecuteLayer&& execute_layer)
 {
     if (work.size() != size_t(plan.plan.n)) throw runtime_error("block input size mismatch");
     for (size_t depth = 0; depth < plan.fused_block_levels.size(); ++depth)
@@ -804,19 +795,32 @@ void execute_blocks(vector<SharePair<K>>& work, const PreparedReducedPlan& plan,
         const auto& idx = plan.fused_block_levels[depth];
         if (!idx.empty()) observe(plan.plan.outer_partition_cancelled ? "single_cong" : "block",
                 depth, idx.size() / 2, [&]() {
-            return KonaReducedDepthHybrid::compare_and_swap_level<K>(
-                    work, idx, true, profile, policy, dcf, player);
+            return execute_layer(work, idx, profile, policy, dcf, player);
         });
     }
+}
+
+template<int K, class Observer>
+void execute_blocks(vector<SharePair<K>>& work, const PreparedReducedPlan& plan,
+        const string& profile, const Policy& policy, KonaDcfCompare::Compare64<K>& dcf,
+        RealTwoPartyPlayer* player, Observer&& observe)
+{
+    execute_blocks<K>(work, plan, profile, policy, dcf, player, observe,
+            [](auto& shares, const auto& idx, const auto& profile, const auto& policy,
+                    auto& dcf, auto* player) {
+                return KonaReducedDepthHybrid::compare_and_swap_level<K>(
+                        shares, idx, true, profile, policy, dcf, player);
+            });
 }
 
 // Accepts already sorted local Top-k blocks in public collection order.
 // Full uses all unordered pairs and rank=0; Pruned uses cross-block pairs
 // satisfying u+v<=K+1 and initial_rank=u-1. Neither matrix performs swap.
-template<int K, class Observer>
+template<int K, class Observer, class MeasureCompare = DirectCompare>
 Output<K> execute_terminal(vector<SharePair<K>> candidates, const TerminalPlan& plan,
         int k, const string& profile, const Policy& policy,
-        KonaDcfCompare::Compare64<K>& dcf, RealTwoPartyPlayer* player, Observer&& observe)
+        KonaDcfCompare::Compare64<K>& dcf, RealTwoPartyPlayer* player, Observer&& observe,
+        MeasureCompare measure_compare = {})
 {
     if (candidates.size() != plan.input_count) throw runtime_error("terminal input size mismatch");
     Output<K> out;
@@ -850,7 +854,7 @@ Output<K> execute_terminal(vector<SharePair<K>> candidates, const TerminalPlan& 
         if (!plan.matrix_idx.empty()) observe("matrix_rank", plan.reverse_used ? 1 : 0,
                 plan.matrix_comparators, [&]() {
             return secure_matrix_rank_hybrid<K>(candidates, plan.matrix_idx,
-                    plan.initial_rank, out.rank, profile, policy, dcf, player);
+                    plan.initial_rank, out.rank, profile, policy, dcf, player, measure_compare);
         });
         else
         {
@@ -861,7 +865,7 @@ Output<K> execute_terminal(vector<SharePair<K>> candidates, const TerminalPlan& 
         }
         if (!out.rank.empty()) observe("rank_mask", plan.reverse_used ? 2 : 1,
                 out.rank.size(), [&]() {
-            return topk_mask_from_rank_hybrid<K>(out.rank, k, out.mask, profile, policy, dcf, player);
+            return topk_mask_from_rank_hybrid<K>(out.rank, k, out.mask, profile, policy, dcf, player, measure_compare);
         });
     }
     out.candidates = std::move(candidates);
