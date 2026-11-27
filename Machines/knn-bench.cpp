@@ -1866,7 +1866,8 @@ void parse_argv(
         int& warmup,
         string& matrix_backend_name,
         uint64_t& seed,
-        KonaReducedDepthHybrid::Policy& policy)
+        KonaReducedDepthHybrid::Policy& policy,
+        bool allow_all_profiles = false)
 {
     opt.add("5000", 0, 1, 0, "Port number base", "-pn", "--portnumbase");
     opt.add("", 0, 1, 0, "Player number", "-p", "--player");
@@ -1995,8 +1996,8 @@ void parse_argv(
             mode != "obssn-matrix-only" &&
             mode != "octm-matrix-only")
         throw runtime_error("unknown mode: " + mode);
-    if (profile != "lan" && profile != "wan")
-        throw runtime_error("network-profile must be lan or wan");
+    if (!allow_all_profiles && profile != "lan" && profile != "wan")
+        throw runtime_error("network-profile must be lan or wan in this scope");
     // Resolve once for every entry, after legacy mode aliases are normalized.
     policy.comparator_override = comparator_name == "pcr" ? KonaReducedDepthHybrid::Backend::PCR :
         comparator_name == "dcf" ? KonaReducedDepthHybrid::Backend::DCF : KonaReducedDepthHybrid::Backend::AUTO;
@@ -2858,7 +2859,7 @@ using namespace matrix_engine;
 int run(int argc,const char** argv, const string& layout_flag, const string& layout_value) {
     int n,k,repeats,warmup;uint64_t seed;string mode,profile,matrix_backend;
     KonaReducedDepthHybrid::Policy policy;
-    parse_argv(argc,argv,n,k,mode,profile,repeats,warmup,matrix_backend,seed,policy);
+    parse_argv(argc,argv,n,k,mode,profile,repeats,warmup,matrix_backend,seed,policy,true);
     if(dataset_path.empty()||mode!="pruned-matrix-hybrid"||repeats!=1||warmup!=0||vote_labels<1)
         throw runtime_error("hybrid full requires a dataset, pruned matrix, one trial and label domain");
     const auto setup0=chrono::steady_clock::now();
@@ -3215,6 +3216,7 @@ int main(int argc,char** argv) {
             if(a=="--help"||a=="-?"){
                 cout<<"knn-bench.x --scheme constantpp|secknn|kona|hybrid|shao --scope full|distance|checkpoints|shared|pre-vote|topk|terminal|vote [options]\n"
                     <<"Hybrid/Kona batched-dcf: --chunking off|on (default off)\nCommon: -p 0|1 -pn PORT --dataset PATH --k K --ks 1,2,3,5,20,100 --network-profile lan|wan\n"
+                    <<"Hybrid/full also supports --network-profile super-dc|mid-lan|mid-wan.\n"
                     <<"full measures real continuous distance+Top-k+vote; checkpoints/shared retain explicit staged/composed semantics.\n";return 0;}
             if(a=="--blocks"||a=="--block-sizes") {
                 if(!layout_flag.empty()||i+1>=argc)

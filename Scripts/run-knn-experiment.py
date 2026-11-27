@@ -105,6 +105,7 @@ import argparse
 import csv
 import datetime
 import fcntl
+from collections import defaultdict
 import hashlib
 import json
 import math
@@ -122,12 +123,16 @@ import uuid
 ROOT=Path(__file__).resolve().parents[1]
 REMOTE='/usr/src/Garnet'
 TARGET='knn-bench.x'
-from kona_network_validation import network_contract, check_network
+from kona_network_validation import NETWORK_CONFIG, network_contract, check_network
 # The same header supplies C++ protocol and Python launch defaults.
 CONFIG_HEADER=ROOT/'Machines/kona-bench-config.hpp'
 DEFAULTS={k:int(v) for k,v in re.findall(r'constexpr std::size_t (\w+) = (\d+);',CONFIG_HEADER.read_text())}
 if not {'DCF_CHUNK','MUL_CHUNK','LAN_THRESHOLD','WAN_THRESHOLD'} <= DEFAULTS.keys():
     raise RuntimeError('Missing shared benchmark defaults in '+str(CONFIG_HEADER))
+HYBRID_THRESHOLDS={
+    profile:DEFAULTS[profile.replace('-','_').upper()+'_THRESHOLD']
+    for profile in NETWORK_CONFIG
+}
 MATRIX_CHUNKING_DEFAULT='on' if DEFAULTS['MATRIX_CHUNKING'] else 'off'
 KONA_CHUNKING_DEFAULT='on' if DEFAULTS['KONA_CHUNKING'] else 'off'
 
@@ -200,13 +205,19 @@ def network_probe(a,out,profile):
             check=True,stdout=log,stderr=subprocess.STDOUT,timeout=180)
     r=json.loads(subprocess.check_output(['docker','exec',a.container,'cat',remote],text=True))
     (out/('network-probe-'+profile+'.json')).write_text(json.dumps(r,indent=2)+'\n')
-    target=1000 if profile=='lan' else 40
+    config=NETWORK_CONFIG[profile]
+    rate=re.fullmatch(r'([0-9.]+)([kmg]?)bit',config['rate'])
+    target=float(rate[1])*{'':1e-6,'k':1e-3,'m':1,'g':1000}[rate[2]]
     rates=[v['receiver_mbps'] for part in r['transfers'].values() for v in part['lanes']]
     # Wide tolerances detect a missing lane or half-rate shaping, not noise.
     if not all(.65*target<v<1.3*target for v in rates):
         raise RuntimeError('Network bandwidth preflight failed: '+str(rates))
     rtts=[r[k]['median_ms'] for k in ['rtt_odd','rtt_even']]
-    if not all((32<v<60) if profile=='wan' else (.7<v<5) for v in rtts):
+    delay=re.fullmatch(r'([0-9.]+)(us|ms|s)',config['delay'])
+    expected_rtt=2*float(delay[1])*{'us':.001,'ms':1,'s':1000}[delay[2]]
+    bounds={'lan':(.7,5),'wan':(32,60)}
+    lower,upper=bounds.get(profile,(.7*expected_rtt,max(5,1.5*expected_rtt)))
+    if not all(lower<v<upper for v in rtts):
         raise RuntimeError('Network latency preflight failed: '+str(rtts))
     print(f'NETWORK PASS {profile}: rates_Mbps={rates}, RTT_ms={rtts}',flush=True)
 
@@ -422,19 +433,30 @@ def summarize(out,rows):
     hybrid=[r for r in rows if r.get('actual_layout')]
     if hybrid:
         write_csv(out/'hybrid_topk_breakdown.csv',hybrid)
-        indexed={(r['dataset'],r['network_profile'],r['k'],r['trial'],r['part'],r['phase']):r for r in hybrid}
+        groups=defaultdict(lambda: defaultdict(dict))
+        for row in hybrid:
+            key=(row['dataset'],row['network_profile'],row['k'],row['trial'])
+            groups[key][row['part']][row['phase']]=row
         pairs=[]
-        for (data,profile,k,trial,part,phase),old in indexed.items():
-            if phase!='topk' or not part.startswith('cut-'):continue
-            next_part=f"cut-{int(part.split('-')[1])+1:02d}"
-            new=indexed.get((data,profile,k,trial,next_part,'topk'))
-            if new is None:continue
-            for step in ('topk','block_cong','terminal','topk_other',*BLOCK_STEPS,*TERMINAL_STEPS):
-                before=indexed[data,profile,k,trial,part,step]
-                after=indexed[data,profile,k,trial,next_part,step]
-                pairs.append(dict(dataset=data,network_profile=profile,k=k,trial=trial,
-                    before=old['actual_layout'],after=new['actual_layout'],phase=step,
-                    saved_ms=before['topk_critical_party_ms']-after['topk_critical_party_ms']))
+        for (data,profile,k,trial),parts in sorted(groups.items()):
+            manual=sorted((part for part in parts if part.startswith('cut-')),
+                          key=lambda part:int(part.split('-')[1]))
+            neighbors=[(before,after) for before,after in zip(manual,manual[1:])
+                       if int(after.split('-')[1])==int(before.split('-')[1])+1]
+            comparisons=([('auto',part) for part in manual] if 'auto' in parts else [])+neighbors
+            for before_part,after_part in comparisons:
+                before,after=parts[before_part],parts[after_part]
+                for step in ('knn_online','vote','topk','block_cong','terminal','topk_other',
+                             *BLOCK_STEPS,*TERMINAL_STEPS):
+                    basis,field={
+                        'knn_online':('full_online_max','online_ms'),
+                        'vote':('full_online_critical_party','online_critical_party_ms'),
+                    }.get(step,('topk_critical_party','topk_critical_party_ms'))
+                    old,new=before[step],after[step]
+                    pairs.append(dict(dataset=data,network_profile=profile,k=k,trial=trial,
+                        before=old['actual_layout'],after=new['actual_layout'],phase=step,
+                        saved_ms=old[field]-new[field],before_part=before_part,after_part=after_part,
+                        timing_basis=basis,before_ms=old[field],after_ms=new[field]))
         write_csv(out/'layout_paired_deltas.csv',pairs)
     if rows and rows[0].get('headline_e2e_only'):rows=[r for r in rows if r['phase']=='knn_online']
     for key in sorted({(r.get('dataset',''),r['part'],r['k'],r['network_profile'],r['phase']) for r in rows}):
@@ -467,7 +489,7 @@ def main():
     p.add_argument('--scope',choices=['experiment','full','distance','vote','topk-vote','topk'],default='experiment')
     p.add_argument('--ks',nargs='+',type=int,default=KS)
     p.add_argument('--repeats',type=int,default=3)
-    p.add_argument('--profiles',nargs='+',choices=['lan','wan','native'],default=None)
+    p.add_argument('--profiles',nargs='+',choices=[*NETWORK_CONFIG,'native'],default=None)
     p.add_argument('--dataset',default='arcene')
     p.add_argument('--datasets',nargs='+',help='Dataset sweep: supported full flows, distance-only for ConstantPP/SecKNN/KONA/Shao, KONA topk, Shao topk-vote')
     p.add_argument('--kona-backend',choices=['original','batched-dcf'],default='batched-dcf')
@@ -512,7 +534,9 @@ def main():
     if a.scope=='topk-vote' and a.scheme not in ['shao','secknn']:p.error('--scope topk-vote supports shao or native secknn')
     if a.scope=='vote' and a.scheme not in ['hybrid','constantpp']:p.error('--scope vote supports hybrid/constantpp')
     if a.profiles is None:a.profiles=['wan'] if a.scheme=='shao' else ['lan','wan']
-    if a.monitor and any(p not in ['lan','wan'] for p in a.profiles):p.error('--monitor requires lan/wan profiles')
+    if any(profile not in ('lan','wan','native') for profile in a.profiles) and (a.scheme,a.scope)!=('hybrid','full'):
+        p.error('super-dc, mid-lan and mid-wan require hybrid/full')
+    if a.monitor and 'native' in a.profiles:p.error('--monitor requires a shaped profile')
     if a.datasets and not ((a.scheme in ['kona','secknn','hybrid'] and a.scope=='full') or (a.scope=='distance') or (a.scheme=='kona' and a.scope=='topk') or (a.scheme=='shao' and a.scope=='topk-vote')):p.error('--datasets requires supported full/distance, KONA topk or Shao topk-vote')
     if a.e2e_only and a.scope!='full':p.error('--e2e-only requires --scope full')
     def dataset_spec(name):
@@ -545,7 +569,7 @@ def main():
     if any(not c['version'].endswith('-serialized-v4') for c in contracts.values()):p.error('Formal KNN requires serialized-v4 network configuration')
     manifest=dict(network_pacing='serialized',network_contracts=contracts,network_validation='mandatory_before_after_independent_of_monitor',scheme=a.scheme,scope=a.scope,dataset=a.dataset,N=a.n,features=a.features,query_count=1,
         datasets=a.dataset_specs,kona_backend=a.kona_backend if a.scheme=='kona' else 'NOT_APPLICABLE',headline_e2e_only=a.e2e_only,planned_pairs=len(jobs),schedule=jobs,cpu_affinity=[0,2],core_exclusivity='NOT_VERIFIED',warmup_trials=0,
-        secmax_mode=a.secmax_mode,topk_mode=a.topk_mode,comparator=a.comparator,matrix_backend=a.matrix_backend,chunking=effective_chunking(a,a.scheme),chunk_limits=dict(dcf=DEFAULTS['DCF_CHUNK'],mul=DEFAULTS['MUL_CHUNK']) if effective_chunking(a,a.scheme)=='on' else None,rounds_schema='theoretical_without_chunk_vs_actual_exchange',hybrid_thresholds=dict(lan=a.lan_threshold,wan=a.wan_threshold),shao_network='rotated-msb-all-layers',shao_vote='batched-dcf',
+        secmax_mode=a.secmax_mode,topk_mode=a.topk_mode,comparator=a.comparator,matrix_backend=a.matrix_backend,chunking=effective_chunking(a,a.scheme),chunk_limits=dict(dcf=DEFAULTS['DCF_CHUNK'],mul=DEFAULTS['MUL_CHUNK']) if effective_chunking(a,a.scheme)=='on' else None,rounds_schema='theoretical_without_chunk_vs_actual_exchange',hybrid_thresholds=HYBRID_THRESHOLDS,shao_network='rotated-msb-all-layers',shao_vote='batched-dcf',
         monitoring=dict(enabled=a.monitor,observer_cpu=4,sample_seconds=5,network_probe_mib=64),
         phase_semantics='full=measured E2E; checkpoints/shared/distance+topk-vote=staged/composed')
     if a.dry_run:print(json.dumps(manifest,indent=2));return
@@ -692,7 +716,7 @@ for pid in matching():
                     if (meta.get('threshold_source')!='Machines/kona-bench-config.hpp' or
                         meta.get('lan_threshold')!=str(DEFAULTS['LAN_THRESHOLD']) or
                         meta.get('wan_threshold')!=str(DEFAULTS['WAN_THRESHOLD']) or
-                        meta.get('effective_threshold')!=str(DEFAULTS[threshold_profile.upper()+'_THRESHOLD']) or
+                        meta.get('effective_threshold')!=str(HYBRID_THRESHOLDS[threshold_profile]) or
                         meta.get('threshold_override')!='0'):
                         raise RuntimeError('Hybrid effective thresholds differ from shared configuration')
                 if item['scope']=='checkpoints':
