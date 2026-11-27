@@ -26,6 +26,25 @@ int main() {
     require(p.plan.block_comparators==680 && p.plan.block_depth==22,"Cong shape changed");
     require(full.matrix_comparators==45 && full.mask_comparators==10,"full shape changed");
     require(pruned.matrix_comparators==15 && pruned.mask_comparators==10,"pruned shape changed");
+    for (const std::vector<int>& keeps : {std::vector<int>{5,5}, {5,3,5}, {5,5,1}, {1,1,1,1,1}})
+    {
+        const auto plan = prepare_matrix(keeps, 5, Terminal::Pruned);
+        std::vector<int> blocks, positions, expected;
+        for (size_t b = 0; b < keeps.size(); ++b)
+            for (int u = 1; u <= keeps[b]; ++u)
+            {
+                blocks.push_back(b);
+                positions.push_back(u);
+            }
+        for (size_t i = 0; i < blocks.size(); ++i)
+            for (size_t j = i + 1; j < blocks.size(); ++j)
+                if (blocks[i] != blocks[j] && positions[i] + positions[j] <= 6)
+                {
+                    expected.push_back(i);
+                    expected.push_back(j);
+                }
+        require(plan.matrix_idx == expected, "pruned pair direction or order changed");
+    }
     const auto single=prepare_matrix({1},1,Terminal::Pruned);
     require(single.comparators==1 && single.depth==1,"standalone single-candidate mask");
     bool rejected=false;

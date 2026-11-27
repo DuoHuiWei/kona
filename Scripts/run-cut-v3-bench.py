@@ -24,7 +24,11 @@ ROOT = Path(__file__).resolve().parents[1]
 REMOTE = "/usr/src/Garnet"
 TARGET = "kona-cut-v3-bench.x"
 DOCKER = ["docker", "exec", "kona-dev"]
-PHASES = ("block_compare", "scs", "matrix_compare", "rank_mask", "local", "online")
+BLOCK_STEPS = ("block_compare", "scs", "block_cong_other")
+TERMINAL_STEPS = ("candidate_collect", "matrix_compare", "rank_local",
+                  "rank_mask_prepare", "rank_mask", "terminal_other")
+PHASES = (*BLOCK_STEPS, *TERMINAL_STEPS, "block_cong", "terminal", "topk_other", "topk")
+DISPLAY = ("block_compare", "scs", "matrix_compare", "rank_mask", "rank_local", "topk")
 COUNTERS = ("sent_bytes", "theoretical_rounds", "exchange_rounds", "transport_actions",
             "dcf_evaluate_calls", "items")
 
@@ -132,10 +136,14 @@ def parse(text, expected):
             raise RuntimeError(f"{name}: expected {value}, got {meta.get(name)}")
     if set(phases) != set(PHASES):
         raise RuntimeError("missing or unexpected phases")
-    for metric in ("online_ms", *COUNTERS[:-1]):
-        if abs(phases["online"][metric] - sum(phases[phase][metric] for phase in PHASES[:-1])) > 1e-6:
-            raise RuntimeError(f"phase closure failed for {metric}")
-    for phase in PHASES[:4]:
+    for total, children in (("block_cong", BLOCK_STEPS), ("terminal", TERMINAL_STEPS),
+                            ("topk", ("block_cong", "terminal", "topk_other"))):
+        for metric in ("online_ms", *COUNTERS[:-1]):
+            if abs(phases[total][metric] - sum(phases[phase][metric] for phase in children)) > 1e-6:
+                raise RuntimeError(f"{total}: phase closure failed for {metric}")
+    if abs(float(meta["topk_online_ms"]) - phases["topk"]["online_ms"]) > 1e-6:
+        raise RuntimeError("topk timer mismatch")
+    for phase in ("block_compare", "scs", "matrix_compare", "rank_mask"):
         entries = [row for row in batches if row["phase"] == phase]
         for metric in ("online_ms", *COUNTERS):
             if abs(phases[phase][metric] - sum(row[metric] for row in entries)) > 1e-6:
@@ -183,22 +191,22 @@ def summarize(out, cases, trials, batches):
     write_csv(out / "adjacent_trials.csv", deltas)
     lines = ["# Cut-v3", "", "Each trial uses the party with the slower complete online time "
              "for all phase times. Positive deltas are savings.", "",
-             "| Layout | Block compare ms | SCS ms | Matrix compare ms | Rank-mask ms | Local ms | Online ms |",
+             "| Layout | Block compare ms | SCS ms | Matrix compare ms | Rank-mask ms | Rank-local ms | Top-k ms |",
              "|---|---:|---:|---:|---:|---:|---:|"]
     means = {(row["case"], row["phase"]): row["mean_ms"] for row in summary}
     for case in cases:
-        if (case["case"], "online") in means:
-            values = [means[case["case"], phase] for phase in PHASES]
+        if (case["case"], "topk") in means:
+            values = [means[case["case"], phase] for phase in DISPLAY]
             lines.append(f"| {case['layout']} | " + " | ".join(f"{v:.6f}" for v in values) + " |")
     lines += ["", "| Adjacent layouts | Block compare saved ms | SCS saved ms | Matrix compare saved ms | "
-              "Rank-mask saved ms | Local saved ms | Online saved ms |",
+              "Rank-mask saved ms | Rank-local saved ms | Top-k saved ms |",
               "|---|---:|---:|---:|---:|---:|---:|"]
     for before, after in zip(cases, cases[1:]):
         paired = [row for row in deltas if (row["before"], row["after"]) ==
                   (before["layout"], after["layout"])]
         if paired:
             values = [statistics.mean(row["saved_ms"] for row in paired if row["phase"] == phase)
-                      for phase in PHASES]
+                      for phase in DISPLAY]
             lines.append(f"| {before['layout']} → {after['layout']} | " +
                          " | ".join(f"{v:.6f}" for v in values) + " |")
     (out / "summary.md").write_text("\n".join(lines) + "\n")
@@ -367,7 +375,7 @@ print(runtime)
                                         party=party, **layer) for layer in layers)
                 if source_hashes() != hashes or output(identity_cmd) != identity:
                     raise RuntimeError("source, build or material changed during trial")
-                slower = max(range(2), key=lambda index: parties[index]["online"]["online_ms"])
+                slower = max(range(2), key=lambda index: parties[index]["topk"]["online_ms"])
                 for phase in PHASES:
                     rows = [party[phase] for party in parties]
                     if any(rows[0][metric] != rows[1][metric] for metric in COUNTERS):

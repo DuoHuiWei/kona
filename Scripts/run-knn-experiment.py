@@ -247,7 +247,7 @@ def source_hashes():
         'Scripts/codex-container-build.sh','Scripts/container-network.sh','Scripts/kona-bench-log.sh','Scripts/kona_network_validation.py',
         'Scripts/measure-container-profile-throughput.py',
         'Machines/kona-bench-affinity.hpp','Machines/secknn.cpp','Machines/kona-upstream.cpp',
-        'Machines/kona-cong-topk.hpp','Machines/kona-reduced-depth-cong-topk.hpp',
+        'Machines/kona-cong-topk.hpp','Machines/kona-reduced-depth-cong-topk.hpp','Machines/kona-cut-v3.hpp',
         'Machines/kona-reduced-depth-hybrid-adapter.hpp','Machines/kona-mask-vote.hpp',
         'Machines/kona-pcr-compare.hpp','Machines/kona-dcf-compare.hpp',
         'Machines/kona-share-conversion.hpp','Machines/kona-cong-kona-adapter.hpp',
@@ -264,6 +264,17 @@ def schedule(a):
         jobs.append(dict(part=part,scope=scope,k=k,trial=trial,network_profile=profile,
             bench_scheme=engine,ks=','.join(map(str,order)),
             job=f'{part}-t{trial:03d}-k{k:03d}-{profile}'))
+    if a.layout_cases:
+        for trial in range(1,a.repeats+1):
+            cases=a.layout_cases if trial%2 else list(reversed(a.layout_cases))
+            for spec in a.dataset_specs:
+                for k in a.ks:
+                    for profile in a.profiles:
+                        for case in cases:
+                            add(case['part'],'full',k,profile,trial,[])
+                            jobs[-1].update(spec,**case)
+                            jobs[-1]['job']=spec['dataset_name']+'-'+jobs[-1]['job']
+        return jobs
     if getattr(a,'datasets',None):
         for trial in range(1,a.repeats+1):
             shift=(trial-1)%len(a.dataset_specs)
@@ -346,6 +357,7 @@ def command_arguments(a,item):
         args += ['--chunking',a.chunking or MATRIX_CHUNKING_DEFAULT,'-n',str(a.n),'-m','pruned','-r','1','--warmup','0','--vote-labels',str(a.label_domain)]
         if item['scope']!='vote':
             args += ['--comparator',a.comparator,'--matrix-backend',a.matrix_backend]
+        if item.get('layout_flag'):args += [item['layout_flag'],item['layout_value']]
     return args
 
 def parse(path,item):
@@ -365,6 +377,25 @@ def parse(path,item):
         r.setdefault('dcf_evaluate_calls',meta.get(counter,'-1'))
     return meta,phases
 
+BLOCK_STEPS=('block_compare','scs','block_cong_other')
+TERMINAL_STEPS=('candidate_collect','matrix_compare','rank_local','rank_mask_prepare','rank_mask','terminal_other')
+
+def exact_layout(item):
+    n=item['N']
+    if item.get('layout_flag')=='--blocks':
+        count=int(item['layout_value'])
+        target=(n+count-1)//count
+        length=n if count==1 else 1<<(target-1).bit_length()
+        full,tail=divmod(n,length)
+        if full+bool(tail)!=count:
+            raise ValueError(f'requested {count} blocks; generated {full} x {length}, tail {tail}; use --block-sizes')
+        return [length]*full+([tail] if tail else [])
+    if item.get('layout_flag')=='--block-sizes':
+        sizes=[int(size) for size in item['layout_value'].split(',')]
+        if sum(sizes)!=n:raise ValueError(f'block sizes must sum to {n}')
+        return sizes
+    return None
+
 def expected(a,item):
     k=item['k'];scope=item['scope']
     if scope=='topk':return {('topk',k)}
@@ -375,7 +406,7 @@ def expected(a,item):
     if scope=='shared':return {(p,k) for k in a.ks for p in ['block_cong','terminal','topk','vote']}
     if scope=='topk-vote' and a.scheme in ['shao','secknn']:return {(p,k) for p in ['topk','vote_frequency','vote_max','vote','online_other','topk_vote_online']}
     stages=['distance','topk','vote','online_other','knn_online']
-    if a.scheme=='hybrid':stages += ['block_cong','terminal','topk_other']
+    if a.scheme=='hybrid':stages += ['block_cong','terminal','topk_other',*BLOCK_STEPS,*TERMINAL_STEPS]
     if a.scheme=='shao':stages += ['vote_frequency','vote_max']
     if a.scheme in ['secknn','kona']:stages += ['vote_frequency','vote_max','topk_vote_online']
     return {(p,k) for p in stages}
@@ -388,6 +419,23 @@ def check_closure(phases,total,leaves,k):
 
 def summarize(out,rows):
     write_csv(out/'phase_trials.csv',rows);summary=[]
+    hybrid=[r for r in rows if r.get('actual_layout')]
+    if hybrid:
+        write_csv(out/'hybrid_topk_breakdown.csv',hybrid)
+        indexed={(r['dataset'],r['network_profile'],r['k'],r['trial'],r['part'],r['phase']):r for r in hybrid}
+        pairs=[]
+        for (data,profile,k,trial,part,phase),old in indexed.items():
+            if phase!='topk' or not part.startswith('cut-'):continue
+            next_part=f"cut-{int(part.split('-')[1])+1:02d}"
+            new=indexed.get((data,profile,k,trial,next_part,'topk'))
+            if new is None:continue
+            for step in ('topk','block_cong','terminal','topk_other',*BLOCK_STEPS,*TERMINAL_STEPS):
+                before=indexed[data,profile,k,trial,part,step]
+                after=indexed[data,profile,k,trial,next_part,step]
+                pairs.append(dict(dataset=data,network_profile=profile,k=k,trial=trial,
+                    before=old['actual_layout'],after=new['actual_layout'],phase=step,
+                    saved_ms=before['topk_critical_party_ms']-after['topk_critical_party_ms']))
+        write_csv(out/'layout_paired_deltas.csv',pairs)
     if rows and rows[0].get('headline_e2e_only'):rows=[r for r in rows if r['phase']=='knn_online']
     for key in sorted({(r.get('dataset',''),r['part'],r['k'],r['network_profile'],r['phase']) for r in rows}):
         group=[r for r in rows if (r.get('dataset',''),r['part'],r['k'],r['network_profile'],r['phase'])==key]
@@ -435,9 +483,24 @@ def main():
     p.add_argument('--comparator',choices=['hybrid','dcf','pcr'],default='hybrid',help='Hybrid selection backend; optimized vote stays DCF')
     p.add_argument('--chunking',choices=['on','off'],default=None,help='Hybrid or Kona batched-dcf: default off; on restores shared 16384 limits')
     p.add_argument('--matrix-backend',choices=['auto','dcf','pcr'],default='auto',help='Hybrid matrix ranking override only')
+    layouts=p.add_mutually_exclusive_group()
+    layouts.add_argument('--blocks',type=int,action='append',default=[])
+    layouts.add_argument('--block-sizes',action='append',default=[])
+    p.add_argument('--include-auto-layout',action='store_true',help='Interleave the original automatic layout with manual layouts')
     p.add_argument('--output',type=Path)
     p.add_argument('--dry-run',action='store_true')
     a=p.parse_args();os.chdir(ROOT)
+    a.layout_cases=[]
+    if a.blocks or a.block_sizes or a.include_auto_layout:
+        if (a.scheme,a.scope)!=('hybrid','full'):p.error('layout comparisons require hybrid/full')
+        if a.include_auto_layout and not (a.blocks or a.block_sizes):p.error('include-auto-layout requires a manual layout')
+        if a.include_auto_layout:a.layout_cases.append(dict(part='auto',layout_flag='',layout_value=''))
+        flag,values=('--blocks',a.blocks) if a.blocks else ('--block-sizes',a.block_sizes)
+        for i,value in enumerate(values,1):
+            value=str(value)
+            if not re.fullmatch(r'[1-9][0-9]*(?:,[1-9][0-9]*)*',value) or any(int(v)>2147483647 for v in value.split(',')):
+                p.error('layout entries must be positive 32-bit integers')
+            a.layout_cases.append(dict(part=f'cut-{i:02d}',layout_flag=flag,layout_value=value))
     if a.chunking is not None and not (a.scheme=='hybrid' or (a.scheme=='kona' and a.kona_backend=='batched-dcf')):p.error('--chunking requires hybrid or kona/batched-dcf')
     if (a.comparator!='hybrid' or a.matrix_backend!='auto') and (a.scheme!='hybrid' or a.scope!='full'):
         p.error('Explicit selection backend overrides currently require --scheme hybrid --scope full')
@@ -473,6 +536,10 @@ def main():
     if min(a.repeats,a.timeout)<1 or any(k<1 or k>spec['N'] for spec in a.dataset_specs for k in a.ks):p.error('invalid repeats/timeout/k')
     if len(set(a.ks))!=len(a.ks) or len(set(a.profiles))!=len(a.profiles):p.error('duplicate k/profile')
     jobs=schedule(a)
+    for item in jobs:
+        if item.get('layout_flag'):
+            try:item['expected_layout']=','.join(map(str,exact_layout(item)))
+            except ValueError as error:p.error(str(error))
     if a.scheme=='constantpp' and a.scope=='experiment' and a.n<2:p.error('pre-vote requires N>1')
     contracts={profile:network_contract(profile,'serialized',a.container) for profile in a.profiles if profile!='native'}
     if any(not c['version'].endswith('-serialized-v4') for c in contracts.values()):p.error('Formal KNN requires serialized-v4 network configuration')
@@ -492,7 +559,7 @@ def main():
     print(f'RESULT_DIRECTORY={out}',flush=True)
     baseline=source_hashes();manifest.update(source_sha256=baseline,command=sys.argv,started_utc=stamp)
     (out/'batch_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    rows=[];network_checks=[];completed=0;failure=None;original=None;touched=False;started=time.monotonic()
+    rows=[];batch_rows=[];network_checks=[];completed=0;failure=None;original=None;touched=False;started=time.monotonic()
     env=dict(os.environ,KONA_CONTAINER=a.container,KONA_NETWORK_PRIVILEGED='1')
     def validate_network(item,boundary):
         job=item['job'];profile=item['network_profile']
@@ -639,7 +706,15 @@ for pid in matching():
                 if a.scheme=='hybrid' and item['scope']=='full':
                     if meta.get('comparator_override')!=a.comparator or meta.get('matrix_backend_override')!=a.matrix_backend:
                         raise RuntimeError('Hybrid backend override was not applied')
-                    if meta.get('vote_backend')!='DCF_OPTIMIZED' or meta.get('full_knn_measured')!='1':
+                    if item.get('expected_layout') and meta.get('actual_layout')!=item['expected_layout']:
+                        raise RuntimeError('effective layout differs from requested layout')
+                    expected_rule='manual-cut-v3' if item.get('layout_flag') else 'original-formula-and-4k-gt-Lmax-cutoff'
+                    if meta.get('partition_rule')!=expected_rule:raise RuntimeError('layout rule mismatch')
+                    for line in paths[party].read_text().splitlines():
+                        if line.startswith('BENCH_BATCH '):
+                            batch_rows.append(dict(job=job,party=party,actual_layout=meta['actual_layout'],
+                                **dict(field.split('=',1) for field in line.split()[1:])))
+                    if meta.get('vote_backend')!='DCF_OPTIMIZED'  or meta.get('full_knn_measured')!='1':
                         raise RuntimeError('Hybrid must use optimized vote and measured full online flow')
                 if (meta.get('party'),meta.get('train_count'),meta.get('features'))!=(str(party),str(a.n),str(a.features)):raise RuntimeError('Wrong party/scale')
                 evidence=f'BENCH_AFFINITY party={party} cpu={0 if party==0 else 2} source=cpp_bench affinity_check=PASS'
@@ -648,7 +723,10 @@ for pid in matching():
                 actual={path:digest for digest,path in re.findall(r'^([0-9a-f]{64})  (.+)$',paths[party].read_text(),re.M)}
                 if actual!=info['dataset_files_sha256']:raise RuntimeError('Dataset changed')
                 if item['scope']=='full':check_closure(phases,'knn_online',['distance','topk','vote','online_other'],item['k'])
-                if a.scheme=='hybrid' and item['scope']=='full':check_closure(phases,'topk',['block_cong','terminal','topk_other'],item['k'])
+                if a.scheme=='hybrid' and item['scope']=='full':
+                    check_closure(phases,'topk',['block_cong','terminal','topk_other'],item['k'])
+                    check_closure(phases,'block_cong',BLOCK_STEPS,item['k'])
+                    check_closure(phases,'terminal',TERMINAL_STEPS,item['k'])
                 if a.scheme in ['shao','secknn'] and item['scope'] in ['full','topk-vote']:
                     check_closure(phases,'vote',['vote_frequency','vote_max'],item['k'])
                     if item['scope']=='topk-vote':check_closure(phases,'topk_vote_online',['topk','vote','online_other'],item['k'])
@@ -659,6 +737,13 @@ for pid in matching():
                     for k in a.ks:check_closure(phases,'topk',['block_cong','terminal'],k)
                     nodes=[l for l in paths[party].read_text().splitlines() if l.startswith('SHARED_NODE ')]
                     if len(nodes)!=int(meta['executed_unique_layer_count']) or any('execution_count=1 ' not in l for l in nodes):raise RuntimeError('Invalid shared execution trace')
+            hybrid_full=a.scheme=='hybrid' and item['scope']=='full'
+            if hybrid_full:
+                if parsed[0][0]['actual_layout']!=parsed[1][0]['actual_layout']:
+                    raise RuntimeError('party layouts differ')
+                topk_party=max(range(2),key=lambda p:float(parsed[p][1]['topk',item['k']]['online_ms']))
+                online_party=max(range(2),key=lambda p:float(parsed[p][1]['knn_online',item['k']]['online_ms']))
+                write_csv(out/'topk_batches.csv',batch_rows)
             for phase,k in sorted(expected(a,item)):
                 row=dict(scheme=a.scheme,dataset=a.dataset,kona_backend=a.kona_backend if a.scheme=='kona' else 'NOT_APPLICABLE',headline_e2e_only=a.e2e_only,part=item['part'],scope=item['scope'],k=k,trial=item['trial'],network_profile=item['network_profile'],
                     N=a.n,features=a.features,query_count=1,phase=phase,job=job,status='COMPLETED',correctness='PASS',
@@ -670,6 +755,15 @@ for pid in matching():
                     if row[f'P{party}_transport_actions']!=2*row[f'P{party}_exchange_rounds']:raise RuntimeError('Round/action mismatch')
                     if not math.isfinite(row[f'P{party}_online_ms']) or row[f'P{party}_online_ms']<0:raise RuntimeError('Invalid time')
                 row['online_ms']=max(row['P0_online_ms'],row['P1_online_ms']);row['sent_bytes']=max(row['P0_sent_bytes'],row['P1_sent_bytes'])
+                if a.scheme=='hybrid':
+                    row.update(actual_layout=parsed[0][0]['actual_layout'] if hybrid_full else '',
+                        topk_critical_party=topk_party if hybrid_full else '',
+                        topk_critical_party_ms=row[f'P{topk_party}_online_ms'] if hybrid_full else '',
+                        online_critical_party=online_party if hybrid_full else '',
+                        online_critical_party_ms=row[f'P{online_party}_online_ms'] if hybrid_full else '')
+                    for party,(_,phases) in enumerate(parsed):
+                        for key in ('comparators','pcr_comparators','dcf_comparators','executed','scs_items'):
+                            row[f'P{party}_{key}']=phases[phase,k].get(key,'')
                 rows.append(row)
             completed+=1;summarize(out,rows)
         frozen()

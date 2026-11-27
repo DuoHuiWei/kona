@@ -32,7 +32,7 @@
 #include <sys/resource.h>
 #include "Machines/kona-cong-topk.hpp"
 #include "Machines/kona-dcf-compare.hpp"
-#include "Machines/kona-reduced-depth-cong-topk.hpp"
+#include "Machines/kona-cut-v3.hpp"
 #include "Machines/kona-reduced-depth-hybrid-adapter.hpp"
 #include "Machines/kona-mask-vote.hpp"
 #include <limits>
@@ -2598,7 +2598,7 @@ namespace {
 using SharedClock = std::chrono::steady_clock;
 struct SharedMetric {
     PhaseStats comm;
-    uint64_t dcf_calls=0,comparators=0,pcr=0,dcf=0,logical=0;
+    uint64_t dcf_calls=0,comparators=0,pcr=0,dcf=0,logical=0,scs_items=0;
     double dcf_ms=0;
 };
 SharedMetric add_metric(SharedMetric a,const SharedMetric& b) {
@@ -2606,7 +2606,7 @@ SharedMetric add_metric(SharedMetric a,const SharedMetric& b) {
     a.comm.sent_bytes+=b.comm.sent_bytes;a.comm.transport_events+=b.comm.transport_events;
     a.comm.transport_actions+=b.comm.transport_actions;
     a.dcf_calls+=b.dcf_calls;a.dcf_ms+=b.dcf_ms;a.comparators+=b.comparators;
-    a.pcr+=b.pcr;a.dcf+=b.dcf;a.logical+=b.logical;return a;
+    a.pcr+=b.pcr;a.dcf+=b.dcf;a.logical+=b.logical;a.scs_items+=b.scs_items;return a;
 }
 template<class F>
 SharedMetric measure_shared(RealTwoPartyPlayer* p,KonaDcfCompare::Compare64<64>& dcf,F operation) {
@@ -2617,13 +2617,13 @@ SharedMetric measure_shared(RealTwoPartyPlayer* p,KonaDcfCompare::Compare64<64>&
     m.dcf_calls=d1.evaluate_calls-d0.evaluate_calls;
     m.dcf_ms=(d1.evaluate_time-d0.evaluate_time).count()*1000;return m;
 }
-void print_shared_phase(const char* name,int k,const SharedMetric& m,bool composed=true,long long theoretical_rounds=-1) {
+void print_shared_phase(const char* name,int k,const SharedMetric& m,bool composed=true,long long theoretical_rounds=-1,bool executed=true) {
     cout<<"BENCH_PHASE phase="<<name<<" k="<<k<<" party="<<playerno<<" trial=1"
         <<" online_ms="<<m.comm.total_seconds*1000<<" sent_bytes="<<m.comm.sent_bytes
         <<" transport_actions="<<m.comm.transport_events<<" exchange_rounds="<<m.comm.transport_actions
         <<" theoretical_rounds="<<(theoretical_rounds<0?m.logical:theoretical_rounds)<<" dcf_evaluate_calls="<<m.dcf_calls<<" dcf_evaluate_ms="<<m.dcf_ms
         <<" comparators="<<m.comparators<<" pcr_comparators="<<m.pcr<<" dcf_comparators="<<m.dcf
-        <<" timing_kind="<<(composed&&(string(name)=="topk"||string(name)=="block_cong")?"composed_shared_stages":"measured_stage")<<'\n';
+        <<" scs_items="<<m.scs_items<<" executed="<<executed<<" timing_kind="<<(composed&&(string(name)=="topk"||string(name)=="block_cong")?"composed_shared_stages":"measured_stage")<<'\n';
 }
 struct SharedNode {
     vector<int> indices,children,leaves;
@@ -2855,7 +2855,7 @@ int run(int argc,const char** argv) {
 
 namespace hybrid_full_engine {
 using namespace matrix_engine;
-int run(int argc,const char** argv) {
+int run(int argc,const char** argv, const string& layout_flag, const string& layout_value) {
     int n,k,repeats,warmup;uint64_t seed;string mode,profile,matrix_backend;
     KonaReducedDepthHybrid::Policy policy;
     parse_argv(argc,argv,n,k,mode,profile,repeats,warmup,matrix_backend,seed,policy);
@@ -2865,8 +2865,15 @@ int run(int argc,const char** argv) {
     const auto data=ConstantPP::load_constantpp_dataset(dataset_path);
     n=data.database.size();clear_input=make_plaintext_items(n,k,seed);
     for(const auto& item:clear_input)if(item.label>=uint64_t(vote_labels))throw runtime_error("label domain mismatch");
-    auto prepared=KonaReducedDepthCongTopK::prepare_reduced_plan(n,k);
-    auto terminal=KonaReducedDepthCongTopK::prepare_terminal(prepared,KonaReducedDepthCongTopK::Terminal::Pruned);
+    const auto plan_start=chrono::steady_clock::now();
+    const auto plan = layout_flag.empty() ?
+        KonaCutV3::prepare(KonaReducedDepthCongTopK::build_reduced_depth_cong_plan(n,k,false)) :
+        KonaCutV3::prepare(n,k,layout_flag=="--blocks" ?
+            KonaCutV3::blocks_layout(n,KonaCutV3::positive(layout_value)) :
+            KonaCutV3::explicit_layout(layout_value));
+    const auto plan_ms=chrono::duration<double,milli>(chrono::steady_clock::now()-plan_start).count();
+    const auto& prepared=plan.blocks;
+    const auto& terminal=plan.terminal;
     unique_ptr<RealTwoPartyPlayer> connection(start_networking());auto* player=connection.get();
     KonaDcfCompare::Compare64<64> dcf(player,playerno);
     // Original online KONA distance; prepare the existing zero-auxiliary inputs locally.
@@ -2887,68 +2894,117 @@ int run(int argc,const char** argv) {
     using hybrid_shared_engine::print_shared_phase;
     KonaReducedDepthCongTopK::Output<64> output;Z2<64> winner;
     SharedMetric dist,topk,vote,block,tail,topk_other;
-    struct Shape {uint64_t comparators=0,pcr=0,dcf=0,bytes=0,exchanges=0,logical=0;};
-    Shape block_shape,tail_shape;
-    auto observer=[&](const char* phase,size_t,size_t count,auto operation){
-        const auto backend=operation();
-        const bool is_block=string(phase)=="block"||string(phase)=="single_cong";
-        const bool swaps=string(phase)!="matrix_rank"&&string(phase)!="rank_mask";
-        auto& shape=is_block?block_shape:tail_shape;
-        const bool pcr=backend==KonaReducedDepthHybrid::Backend::PCR;
-        shape.comparators+=count;if(pcr)shape.pcr+=count;else shape.dcf+=count;
-        shape.bytes+=(pcr?70:8)*count+(swaps?64*count:0);
-        shape.exchanges+=(pcr?7:0)+KonaBenchConfig::chunks(count,pcr?KonaBenchConfig::mul_chunk():KonaBenchConfig::dcf_chunk())+(swaps?KonaBenchConfig::chunks(2*count,KonaBenchConfig::mul_chunk()):0);
-        shape.logical+=(pcr?8:1)+(swaps?1:0);
+    struct Batch {
+        const char* phase;
+        size_t layer, width;
+        KonaReducedDepthHybrid::Backend backend;
+        SharedMetric metric;
+    };
+    vector<Batch> batches;
+    batches.reserve(2*prepared.fused_block_levels.size()+2);
+    const vector<string> substeps={"block_compare","scs","candidate_collect","matrix_compare",
+        "rank_local","rank_mask_prepare","rank_mask"};
+    map<string,SharedMetric> sub;
+    for(const auto& name:substeps)sub.emplace(name,SharedMetric{});
+    auto record_local=[&](const char* name,auto operation) {
+        auto metric=measure_shared(player,dcf,operation);
+        sub.at(name)=hybrid_shared_engine::add_metric(sub.at(name),metric);
+    };
+    auto record_batch=[&](const char* name,size_t layer,size_t width,auto backend,auto operation) {
+        batches.push_back({name,layer,width,backend,measure_shared(player,dcf,operation)});
+    };
+    auto record_parent=[&](const char* name,auto operation) {
+        auto& metric=string_view(name)=="block_cong"?block:tail;
+        metric=measure_shared(player,dcf,operation);
     };
     sync_outside_timer(player);
     const auto c0=player->total_comm();const auto t0=chrono::steady_clock::now();
     dist=measure_shared(player,dcf,[&]{distance_party.compute_ESD_for_one_query(0);});
     topk=measure_shared(player,dcf,[&]{
-        block=measure_shared(player,dcf,[&]{
-            KonaReducedDepthCongTopK::execute_blocks<64>(distance_party.m_ESD_vec,prepared,profile,policy,dcf,player,observer);
-        });
-        tail=measure_shared(player,dcf,[&]{
-            auto candidates=KonaReducedDepthCongTopK::collect_block_candidates<64>(distance_party.m_ESD_vec,prepared.plan,prepared.block_offsets);
-            output=KonaReducedDepthCongTopK::execute_terminal<64>(std::move(candidates),terminal,k,profile,policy,dcf,player,observer);
-        });
+        output=KonaCutV3::execute(distance_party.m_ESD_vec,plan,profile,policy,dcf,player,
+                record_parent,record_batch,record_local);
     });
     KonaMaskVote::DcfVoteStats vote_shape;
     vote=measure_shared(player,dcf,[&]{winner=KonaMaskVote::vote_dcf_optimized<64>(output.candidates,output.mask,vote_labels,player,dcf,output.mask.empty(),&vote_shape,k);});
     const auto t1=chrono::steady_clock::now();const auto c1=player->total_comm();
     // All detailed accounting is deferred until the independent full end.
-    block.comparators=block_shape.comparators;block.pcr=block_shape.pcr;block.dcf=block_shape.dcf;
-    tail.comparators=tail_shape.comparators;tail.pcr=tail_shape.pcr;tail.dcf=tail_shape.dcf;
-    topk.comparators=block.comparators+tail.comparators;topk.pcr=block.pcr+tail.pcr;topk.dcf=block.dcf+tail.dcf;
-    topk_other.comm=topk.comm;
-    for(auto* m:{&block,&tail}){topk_other.comm.total_seconds-=m->comm.total_seconds;
-        topk_other.comm.comm_seconds-=m->comm.comm_seconds;topk_other.comm.sent_bytes-=m->comm.sent_bytes;
-        topk_other.comm.transport_events-=m->comm.transport_events;topk_other.comm.transport_actions-=m->comm.transport_actions;}
+    using Backend=KonaReducedDepthHybrid::Backend;
+    bool batch_accounting=true;
+    for(auto& batch:batches) {
+        auto& metric=batch.metric;
+        const auto shape=KonaCutV3::batch_shape(batch.width,batch.backend);
+        batch_accounting &= metric.comm.sent_bytes==shape.bytes &&
+                metric.comm.transport_actions==shape.exchanges && metric.dcf_calls==shape.dcf_calls;
+        metric.logical=shape.logical;
+        metric.dcf=batch.backend==Backend::DCF?batch.width:0;
+        metric.pcr=batch.backend==Backend::PCR?batch.width:0;
+        metric.comparators=metric.dcf+metric.pcr;
+        metric.scs_items=batch.backend==Backend::AUTO?batch.width:0;
+        sub.at(batch.phase)=hybrid_shared_engine::add_metric(sub.at(batch.phase),metric);
+    }
+    const auto block_steps=hybrid_shared_engine::add_metric(sub.at("block_compare"),sub.at("scs"));
+    SharedMetric tail_steps;
+    for(size_t i=2;i<substeps.size();++i)
+        tail_steps=hybrid_shared_engine::add_metric(tail_steps,sub.at(substeps[i]));
+    auto copy_counts=[](SharedMetric& parent,const SharedMetric& steps) {
+        parent.logical=steps.logical;parent.comparators=steps.comparators;
+        parent.pcr=steps.pcr;parent.dcf=steps.dcf;parent.scs_items=steps.scs_items;
+    };
+    copy_counts(block,block_steps);copy_counts(tail,tail_steps);
+    copy_counts(topk,hybrid_shared_engine::add_metric(block,tail));
+    auto remainder=[](const SharedMetric& parent,const SharedMetric& steps) {
+        SharedMetric other;
+        other.comm.total_seconds=parent.comm.total_seconds-steps.comm.total_seconds;
+        other.comm.comm_seconds=parent.comm.comm_seconds-steps.comm.comm_seconds;
+        other.comm.sent_bytes=parent.comm.sent_bytes-steps.comm.sent_bytes;
+        other.comm.transport_events=parent.comm.transport_events-steps.comm.transport_events;
+        other.comm.transport_actions=parent.comm.transport_actions-steps.comm.transport_actions;
+        other.dcf_calls=parent.dcf_calls-steps.dcf_calls;
+        other.dcf_ms=parent.dcf_ms-steps.dcf_ms;
+        return other;
+    };
+    topk_other=remainder(topk,hybrid_shared_engine::add_metric(block,tail));
+    const auto block_other=remainder(block,block_steps);
+    const auto terminal_other=remainder(tail,tail_steps);
     const uint64_t vote_logical=vote_shape.logical_rounds();
     vote.comparators=vote_shape.comparators();vote.dcf=vote.comparators;
     SharedMetric total;total.comm=phase_delta(t0,t1,c0,c1);
     total.dcf_calls=dist.dcf_calls+topk.dcf_calls+vote.dcf_calls;
     total.dcf_ms=dist.dcf_ms+topk.dcf_ms+vote.dcf_ms;
-    SharedMetric other;other.comm=total.comm;
-    for(auto* m:{&dist,&topk,&vote}){other.comm.total_seconds-=m->comm.total_seconds;
-        other.comm.comm_seconds-=m->comm.comm_seconds;other.comm.sent_bytes-=m->comm.sent_bytes;
-        other.comm.transport_events-=m->comm.transport_events;other.comm.transport_actions-=m->comm.transport_actions;}
+    const auto other=remainder(total,hybrid_shared_engine::add_metric(
+            hybrid_shared_engine::add_metric(dist,topk),vote));
     const auto opened=reveal_pairs(output.candidates,player);vector<RevealedPair> chosen;
     bool valid=true;
     if(output.mask.empty())chosen=opened;
     else{const auto clear_mask=reveal_values(output.mask,player);for(size_t i=0;i<opened.size();++i){
         if(clear_mask[i]==1)chosen.push_back(opened[i]);else if(clear_mask[i]!=0)valid=false;}}
-    valid=valid&&validate_selected_multiset(chosen,n,k,seed);
-    vector<size_t> counts(vote_labels,0);for(const auto& item:chosen)++counts.at(item.label);
-    valid=valid&&reveal_values({winner},player)[0]==uint64_t(distance(counts.begin(),max_element(counts.begin(),counts.end())));
-    const bool accounting=dist.comm.sent_bytes==0&&dist.comm.transport_events==0&&
-        block.comm.sent_bytes==block_shape.bytes&&block.comm.transport_actions==block_shape.exchanges&&block.dcf_calls==2*block_shape.dcf&&
-        tail.comm.sent_bytes==tail_shape.bytes&&tail.comm.transport_actions==tail_shape.exchanges&&tail.dcf_calls==2*tail_shape.dcf&&
-        topk_other.comm.sent_bytes==0&&topk_other.comm.transport_events==0&&
-        other.comm.sent_bytes==0&&other.comm.transport_events==0&&
+    size_t offset=0;
+    for(const auto& source:prepared.plan.blocks) {
+        for(int i=1;i<source.keep;++i)
+            valid &= opened.at(offset+i-1).value<=opened.at(offset+i).value;
+        offset+=source.keep;
+    }
+    valid=valid&&offset==opened.size()&&validate_selected_multiset(chosen,n,k,seed);
+    vector<size_t> counts(vote_labels,0);
+    for(const auto& item:chosen)if(item.label<counts.size())++counts[item.label];else valid=false;
+    const auto opened_winner=reveal_values({winner},player)[0];
+    valid=valid&&opened_winner==uint64_t(distance(counts.begin(),max_element(counts.begin(),counts.end())));
+    auto local_only=[](const SharedMetric& metric) {
+        return metric.comm.sent_bytes==0&&metric.comm.transport_events==0&&
+            metric.dcf_calls==0&&metric.comm.total_seconds>=0;
+    };
+    const bool accounting=batch_accounting&&local_only(dist)&&local_only(block_other)&&
+        local_only(terminal_other)&&local_only(topk_other)&&local_only(other)&&
+        local_only(sub.at("candidate_collect"))&&local_only(sub.at("rank_local"))&&
+        local_only(sub.at("rank_mask_prepare"))&&
         topk.comparators==prepared.plan.block_comparators+terminal.comparators&&
         vote.dcf_calls==2*vote_shape.comparators()&&
         vote.comm.sent_bytes==8*vote_shape.comparators()+16*vote_shape.mul_items&&
         vote.comm.transport_actions==vote_shape.exchanges();
+    vector<int> sizes,keeps;
+    for(const auto& source:prepared.plan.blocks){
+        sizes.push_back(source.real_size);keeps.push_back(source.keep);
+    }
     cout<<fixed<<setprecision(9)<<"party="<<playerno<<"\nbackend=pruned-matrix-hybrid\ntrain_count="<<n
         <<"\nfeatures="<<data.num_features<<"\nquery_count=1\nk="<<k<<"\nnetwork_env="<<profile
         <<"\nmeasurement_mode=measured_full_knn\nsetup_ms="<<chrono::duration<double,milli>(t0-setup0).count()
@@ -2961,16 +3017,35 @@ int run(int argc,const char** argv) {
         <<"\ncomparator_override="<<comparator_name<<"\nmatrix_backend_override="<<matrix_backend
         <<"\neffective_threshold="<<policy.threshold_for(profile)
         <<"\ninput_preparation=local-zero-auxiliary-aby2-inputs"
-        <<"\npartition_rule=original-formula-and-4k-gt-Lmax-cutoff"
+        <<"\npartition_rule="<<(layout_flag.empty()?"original-formula-and-4k-gt-Lmax-cutoff":"manual-cut-v3")
+        <<"\nactual_layout="<<KonaCutV3::layout_string(sizes)
+        <<"\nblock_keeps="<<KonaCutV3::layout_string(keeps)
+        <<"\nmatrix_comparators="<<terminal.matrix_comparators<<"\nplan_ms="<<plan_ms
+        <<"\nonline_ms="<<total.comm.total_seconds*1000
+        <<"\ntopk_online_ms="<<topk.comm.total_seconds*1000
         <<"\nnetwork_structural_depth="<<prepared.plan.block_depth+terminal.depth<<'\n';
     print_shared_phase("distance",k,dist,false,0);
-    print_shared_phase("block_cong",k,block,false,block_shape.logical);
-    print_shared_phase("terminal",k,tail,false,tail_shape.logical);
+    print_shared_phase("block_cong",k,block,false,block.logical);
+    print_shared_phase("terminal",k,tail,false,tail.logical);
     print_shared_phase("topk_other",k,topk_other,false,0);
-    print_shared_phase("topk",k,topk,false,block_shape.logical+tail_shape.logical);
+    print_shared_phase("topk",k,topk,false,topk.logical);
     print_shared_phase("vote",k,vote,false,vote_logical);
     print_shared_phase("online_other",k,other,false,0);
-    print_shared_phase("knn_online",k,total,false,block_shape.logical+tail_shape.logical+vote_logical);
+    print_shared_phase("knn_online",k,total,false,topk.logical+vote_logical);
+    print_shared_phase("block_cong_other",k,block_other,false);
+    print_shared_phase("terminal_other",k,terminal_other,false);
+    for(const auto& name:substeps) {
+        const bool executed=name=="candidate_collect" ||
+            ((name=="rank_local"||name=="rank_mask_prepare")&&!terminal.direct) ||
+            (name=="scs"&&block.comparators) || sub.at(name).comparators;
+        print_shared_phase(name.c_str(),k,sub.at(name),false,-1,executed);
+    }
+    for(const auto& batch:batches)
+        cout<<"BENCH_BATCH phase="<<batch.phase<<" layer="<<batch.layer<<" width="<<batch.width
+            <<" backend="<<(batch.backend==Backend::AUTO?"SCS":KonaReducedDepthHybrid::backend_name(batch.backend))
+            <<" online_ms="<<batch.metric.comm.total_seconds*1000<<" sent_bytes="<<batch.metric.comm.sent_bytes
+            <<" theoretical_rounds="<<batch.metric.logical
+            <<" exchange_rounds="<<batch.metric.comm.transport_actions<<'\n';
     cout<<"full_knn_measured=1\noutput_scope=winning_label_secret_share\naccounting_check="<<(accounting?"PASS":"FAIL")
         <<"\ncorrectness="<<(valid?"PASS":"FAIL")<<"\ntest_status="<<(valid&&accounting?"COMPLETED":"FAILED")<<endl;
     for(auto* sample:distance_party.m_sample)delete sample;
@@ -3135,18 +3210,26 @@ int run(int argc,const char** argv) {
 using namespace std;
 int main(int argc,char** argv) {
     try{
-        string scheme,scope="full",dataset;vector<string> args;
+        string scheme,scope="full",dataset,layout_flag,layout_value;vector<string> args;
         for(int i=1;i<argc;++i){string a=argv[i];
             if(a=="--help"||a=="-?"){
                 cout<<"knn-bench.x --scheme constantpp|secknn|kona|hybrid|shao --scope full|distance|checkpoints|shared|pre-vote|topk|terminal|vote [options]\n"
                     <<"Hybrid/Kona batched-dcf: --chunking off|on (default off)\nCommon: -p 0|1 -pn PORT --dataset PATH --k K --ks 1,2,3,5,20,100 --network-profile lan|wan\n"
                     <<"full measures real continuous distance+Top-k+vote; checkpoints/shared retain explicit staged/composed semantics.\n";return 0;}
+            if(a=="--blocks"||a=="--block-sizes") {
+                if(!layout_flag.empty()||i+1>=argc)
+                    throw runtime_error("supply at most one complete layout option");
+                layout_flag=a;layout_value=argv[++i];
+                continue;
+            }
             if(a=="--scheme"||a=="--scope"||a=="--dataset"){
                 if(++i>=argc)throw runtime_error("missing value for "+a);
                 if(a=="--scheme")scheme=argv[i];else if(a=="--scope")scope=argv[i];else dataset=argv[i];
             }else{args.push_back(a=="--k"?"-k":a);}
         }
         if(scheme.empty())throw runtime_error("--scheme is required; use --help");
+        if(!layout_flag.empty()&&(scheme!="hybrid"||scope!="full"))
+            throw runtime_error("layout options require hybrid/full");
         // Applicability is validated once, before dispatch/networking. Merely
         // recognizing a flag in a downstream parser does not make it meaningful.
         for(const auto& flag:args){
@@ -3228,7 +3311,7 @@ int main(int argc,char** argv) {
         if(scheme=="shao")return shao_engine::run(native.size(),native.data());
         if(scope=="vote")return hybrid_vote_engine::run(native.size(),native.data());
         if(scope=="shared")return hybrid_shared_engine::run(native.size(),native.data());
-        if(scope=="full")return hybrid_full_engine::run(native.size(),native.data());
+        if(scope=="full")return hybrid_full_engine::run(native.size(),native.data(),layout_flag,layout_value);
         return matrix_engine::run(native.size(),native.data());
     }catch(const exception& e){cerr<<"test_status=FAILED\nerror="<<e.what()<<endl;return 1;}
 }

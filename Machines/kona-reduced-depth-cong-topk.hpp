@@ -187,7 +187,7 @@ inline std::size_t comparator_count(const CongNetwork& network)
 // Standalone terminal planning from public block output lengths. No Cong or
 // secret values are needed. This is the same full/pruned rule used below.
 inline MatrixFinalizationPlan build_matrix_finalization_plan(
-        const std::vector<int>& block_keep, int k)
+        const std::vector<int>& block_keep, int k, bool full = true, bool pruned = true)
 {
     if (block_keep.empty() || k <= 0) throw std::invalid_argument("invalid matrix layout");
     for (int keep : block_keep)
@@ -207,20 +207,27 @@ inline MatrixFinalizationPlan build_matrix_finalization_plan(
     matrix.candidate_count = candidates;
     matrix.output_k = k;
 
-    matrix.all_pairs.reserve(
-        static_cast<std::size_t>(candidates) *
-        static_cast<std::size_t>(candidates > 0 ? candidates - 1 : 0) / 2);
+    if (full)
+    {
+        matrix.all_pairs.reserve(size_t(candidates) * (candidates - 1) / 2);
+        for (int i = 0; i < candidates; ++i)
+            for (int j = i + 1; j < candidates; ++j)
+                matrix.all_pairs.push_back({i, j});
+    }
 
-    for (int i = 0; i < candidates; ++i)
-        for (int j = i + 1; j < candidates; ++j)
-        {
-            matrix.all_pairs.push_back({i, j});
-            if (matrix.candidate_block[i] !=
-                    matrix.candidate_block[j] &&
-                    matrix.candidate_position[i] +
-                            matrix.candidate_position[j] <= k + 1)
-                matrix.pruned_cross_pairs.push_back({i, j});
-        }
+    if (pruned)
+    {
+        std::vector<int> offsets{0};
+        for (int keep : block_keep)
+            offsets.push_back(offsets.back() + keep);
+
+        // Retain lexicographic (i,j) order and orientation from the original scan.
+        for (size_t block = 0; block < block_keep.size(); ++block)
+            for (int u = 0; u < block_keep[block]; ++u)
+                for (size_t other = block + 1; other < block_keep.size(); ++other)
+                    for (int v = 0; v < std::min(block_keep[other], k - u); ++v)
+                        matrix.pruned_cross_pairs.push_back({offsets[block] + u, offsets[other] + v});
+    }
 
     if (matrix.candidate_count < k) throw std::invalid_argument("not enough candidates");
     return matrix;
@@ -246,7 +253,7 @@ inline void append_cong_block(NetworkPlan& plan, int begin, int length)
     plan.blocks.push_back(std::move(block));
 }
 
-inline NetworkPlan build_reduced_depth_cong_plan(int n, int k)
+inline NetworkPlan build_reduced_depth_cong_plan(int n, int k, bool matrix_pairs = true)
 {
     if (n <= 0)
         throw std::invalid_argument("n must be positive");
@@ -319,7 +326,7 @@ inline NetworkPlan build_reduced_depth_cong_plan(int n, int k)
 
     std::vector<int> block_keep;
     for (const auto& block : plan.blocks) block_keep.push_back(block.keep);
-    plan.matrix = build_matrix_finalization_plan(block_keep, k);
+    plan.matrix = build_matrix_finalization_plan(block_keep, k, matrix_pairs, matrix_pairs);
     const int candidates = plan.matrix.candidate_count;
 
     plan.matrix_comparators = plan.matrix.all_pairs.size();
@@ -535,7 +542,13 @@ struct DirectCompare
     Backend operator()(Operation&& operation) const { return operation(); }
 };
 
-template<int K, class MeasureCompare = DirectCompare>
+struct DirectLocal
+{
+    template<class Operation>
+    void operator()(const char*, Operation&& operation) const { operation(); }
+};
+
+template<int K, class MeasureCompare = DirectCompare, class MeasureLocal = DirectLocal>
 inline KonaReducedDepthHybrid::Backend secure_matrix_rank_hybrid(
         const vector<SharePair<K>>& candidates,
         const vector<int>& matrix_idx,
@@ -544,21 +557,23 @@ inline KonaReducedDepthHybrid::Backend secure_matrix_rank_hybrid(
         const string& profile,
         const KonaReducedDepthHybrid::Policy& policy,
         KonaDcfCompare::Compare64<K>& dcf,
-        RealTwoPartyPlayer* player, MeasureCompare measure_compare = {})
+        RealTwoPartyPlayer* player, MeasureCompare measure_compare = {}, MeasureLocal measure_local = {})
 {
     const int playerno = player->my_num();
     const int m = (int)candidates.size();
-    rank_share.assign(m, Z2<K>(0));
-    if (!initial_rank.empty() && (int)initial_rank.size() != m)
-        throw runtime_error("initial rank size mismatch");
+    measure_local("rank_local", [&] {
+        rank_share.assign(m, Z2<K>(0));
+        if (!initial_rank.empty() && (int)initial_rank.size() != m)
+            throw runtime_error("initial rank size mismatch");
 
-    if (playerno == 1)
-    {
-        for (int i = 0; i < m; ++i)
-            rank_share[i] += Z2<K>(
-                    static_cast<mp_limb_t>(
-                            initial_rank.empty() ? 0 : initial_rank[i]));
-    }
+        if (playerno == 1)
+        {
+            for (int i = 0; i < m; ++i)
+                rank_share[i] += Z2<K>(
+                        static_cast<mp_limb_t>(
+                                initial_rank.empty() ? 0 : initial_rank[i]));
+        }
+    });
 
     if (matrix_idx.empty())
         return policy.choose(0, profile);
@@ -571,24 +586,26 @@ inline KonaReducedDepthHybrid::Backend secure_matrix_rank_hybrid(
                 profile, policy, dcf, player, policy.matrix_backend_override);
     });
 
-    const Z2<K> one =
-            playerno == 0 ? Z2<K>(0) :
-            Z2<K>(static_cast<mp_limb_t>(1));
+    measure_local("rank_local", [&] {
+        const Z2<K> one =
+                playerno == 0 ? Z2<K>(0) :
+                Z2<K>(static_cast<mp_limb_t>(1));
 
-    for (size_t p = 0; p < matrix_idx.size() / 2; ++p)
-    {
-        const int i = matrix_idx[2 * p];
-        const int j = matrix_idx[2 * p + 1];
-        const Z2<K> c = compare_res[2 * p];
+        for (size_t p = 0; p < matrix_idx.size() / 2; ++p)
+        {
+            const int i = matrix_idx[2 * p];
+            const int j = matrix_idx[2 * p + 1];
+            const Z2<K> c = compare_res[2 * p];
 
-        rank_share[i] += c;
-        rank_share[j] += one - c;
-    }
+            rank_share[i] += c;
+            rank_share[j] += one - c;
+        }
+    });
 
     return backend;
 }
 
-template<int K, class MeasureCompare = DirectCompare>
+template<int K, class MeasureCompare = DirectCompare, class MeasureLocal = DirectLocal>
 inline KonaReducedDepthHybrid::Backend topk_mask_from_rank_hybrid(
         const vector<Z2<K>>& rank_share,
         int k,
@@ -596,7 +613,7 @@ inline KonaReducedDepthHybrid::Backend topk_mask_from_rank_hybrid(
         const string& profile,
         const KonaReducedDepthHybrid::Policy& policy,
         KonaDcfCompare::Compare64<K>& dcf,
-        RealTwoPartyPlayer* player, MeasureCompare measure_compare = {})
+        RealTwoPartyPlayer* player, MeasureCompare measure_compare = {}, MeasureLocal measure_local = {})
 {
     const int playerno = player->my_num();
     const int m = (int)rank_share.size();
@@ -604,16 +621,18 @@ inline KonaReducedDepthHybrid::Backend topk_mask_from_rank_hybrid(
     vector<Z2<K>> values(2 * m);
     vector<int> idx(2 * m);
 
-    for (int i = 0; i < m; ++i)
-    {
-        values[2 * i] = rank_share[i];
-        values[2 * i + 1] =
-                playerno == 0 ? Z2<K>(0) :
-                Z2<K>(static_cast<mp_limb_t>(k));
+    measure_local("rank_mask_prepare", [&] {
+        for (int i = 0; i < m; ++i)
+        {
+            values[2 * i] = rank_share[i];
+            values[2 * i + 1] =
+                    playerno == 0 ? Z2<K>(0) :
+                    Z2<K>(static_cast<mp_limb_t>(k));
 
-        idx[2 * i] = 2 * i;
-        idx[2 * i + 1] = 2 * i + 1;
-    }
+            idx[2 * i] = 2 * i;
+            idx[2 * i + 1] = 2 * i + 1;
+        }
+    });
 
     vector<Z2<K>> duplicated(2 * m);
     const auto backend = measure_compare([&] {
@@ -688,7 +707,8 @@ inline TerminalPlan prepare_matrix(const vector<int>& block_keep, int k, Termina
 {
     if (kind != Terminal::Full && kind != Terminal::Pruned)
         throw std::invalid_argument("prepare_matrix requires Full or Pruned");
-    const auto matrix = KonaReducedDepthCongTopK::build_matrix_finalization_plan(block_keep, k);
+    const auto matrix = KonaReducedDepthCongTopK::build_matrix_finalization_plan(
+            block_keep, k, kind == Terminal::Full, kind == Terminal::Pruned);
     TerminalPlan t;
     t.input_count = t.candidate_count = matrix.candidate_count;
     const auto& pairs = kind == Terminal::Full ? matrix.all_pairs : matrix.pruned_cross_pairs;
@@ -816,11 +836,11 @@ void execute_blocks(vector<SharePair<K>>& work, const PreparedReducedPlan& plan,
 // Accepts already sorted local Top-k blocks in public collection order.
 // Full uses all unordered pairs and rank=0; Pruned uses cross-block pairs
 // satisfying u+v<=K+1 and initial_rank=u-1. Neither matrix performs swap.
-template<int K, class Observer, class MeasureCompare = DirectCompare>
+template<int K, class Observer, class MeasureCompare = DirectCompare, class MeasureLocal = DirectLocal>
 Output<K> execute_terminal(vector<SharePair<K>> candidates, const TerminalPlan& plan,
         int k, const string& profile, const Policy& policy,
         KonaDcfCompare::Compare64<K>& dcf, RealTwoPartyPlayer* player, Observer&& observe,
-        MeasureCompare measure_compare = {})
+        MeasureCompare measure_compare = {}, MeasureLocal measure_local = {})
 {
     if (candidates.size() != plan.input_count) throw runtime_error("terminal input size mismatch");
     Output<K> out;
@@ -854,18 +874,20 @@ Output<K> execute_terminal(vector<SharePair<K>> candidates, const TerminalPlan& 
         if (!plan.matrix_idx.empty()) observe("matrix_rank", plan.reverse_used ? 1 : 0,
                 plan.matrix_comparators, [&]() {
             return secure_matrix_rank_hybrid<K>(candidates, plan.matrix_idx,
-                    plan.initial_rank, out.rank, profile, policy, dcf, player, measure_compare);
+                    plan.initial_rank, out.rank, profile, policy, dcf, player, measure_compare, measure_local);
         });
         else
         {
-            out.rank.assign(candidates.size(), Z2<K>(0));
-            if (player->my_num() == 1)
-                for (size_t i = 0; i < plan.initial_rank.size(); ++i)
-                    out.rank[i] += Z2<K>(static_cast<mp_limb_t>(plan.initial_rank[i]));
+            measure_local("rank_local", [&] {
+                out.rank.assign(candidates.size(), Z2<K>(0));
+                if (player->my_num() == 1)
+                    for (size_t i = 0; i < plan.initial_rank.size(); ++i)
+                        out.rank[i] += Z2<K>(static_cast<mp_limb_t>(plan.initial_rank[i]));
+            });
         }
         if (!out.rank.empty()) observe("rank_mask", plan.reverse_used ? 2 : 1,
                 out.rank.size(), [&]() {
-            return topk_mask_from_rank_hybrid<K>(out.rank, k, out.mask, profile, policy, dcf, player, measure_compare);
+            return topk_mask_from_rank_hybrid<K>(out.rank, k, out.mask, profile, policy, dcf, player, measure_compare, measure_local);
         });
     }
     out.candidates = std::move(candidates);

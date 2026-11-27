@@ -92,7 +92,9 @@ int run(int argc, char** argv)
     const size_t threshold = policy.threshold_for(profile);
     KonaBenchAffinity::bind_fixed_cpu(describe ? 0 : party);
     KonaBenchConfig::ScopedChunking chunks(chunking == "on");
+    const auto plan_start = Clock::now();
     const auto plan = prepare(n, k, layout);
+    const auto plan_ms = std::chrono::duration<double, std::milli>(Clock::now()-plan_start).count();
     vector<int> keeps;
     for (const auto& block : plan.blocks.plan.blocks)
         keeps.push_back(block.keep);
@@ -101,6 +103,8 @@ int run(int argc, char** argv)
               << "\nprofile=" << profile << "\nthreshold=" << threshold
               << "\nchunking=" << chunking << "\ndcf_chunk=" << KonaBenchConfig::dcf_chunk()
               << "\nscs_mul_chunk=" << KonaBenchConfig::mul_chunk()
+              << "\nplan_ms=" << plan_ms
+              << "\nnetwork_structural_depth=" << plan.blocks.plan.block_depth + plan.terminal.depth
               << "\nlayout=" << layout_string(layout) << "\nblock_keeps=" << layout_string(keeps)
               << "\ncandidate_count=" << plan.terminal.input_count
               << "\nblock_comparators=" << plan.blocks.plan.block_comparators
@@ -164,90 +168,69 @@ int run(int argc, char** argv)
         return metric;
     };
 
-    constexpr const char* phases[] = {
-        "block_compare", "scs", "matrix_compare", "rank_mask", "local"
-    };
-    enum { Block, Swap, Matrix, Mask, Local };
-    std::array<Metric, 5> totals;
+    const vector<string> block_steps={"block_compare","scs"};
+    const vector<string> terminal_steps={"candidate_collect","matrix_compare","rank_local",
+            "rank_mask_prepare","rank_mask"};
+    std::map<string,Metric> totals;
+    for(const auto& name:block_steps)totals.emplace(name,Metric{});
+    for(const auto& name:terminal_steps)totals.emplace(name,Metric{});
     vector<Batch> batches;
-    batches.reserve(2 * plan.blocks.fused_block_levels.size() + 2);
-    auto record = [&](size_t phase, size_t layer, size_t width, Backend backend, Metric metric) {
-        metric.rounds = phase == Swap ? 1 : backend == Backend::PCR ? 8 : 1;
-        metric.items = width;
-        totals[phase] += metric;
-        batches.push_back({phases[phase], phase == Swap ? "SCS" :
-                KonaReducedDepthHybrid::backend_name(backend), layer, width, metric});
+    batches.reserve(2*plan.blocks.fused_block_levels.size()+2);
+    auto record_batch=[&](const char* name,size_t layer,size_t width,Backend backend,auto operation) {
+        auto metric=measure(operation);
+        metric.items=width;
+        batches.push_back({name,backend==Backend::AUTO?"SCS":KonaReducedDepthHybrid::backend_name(backend),
+                layer,width,metric});
     };
-
-    size_t block_layer = 0;
-    auto block_observer = [&](const char*, size_t layer, size_t, auto operation) {
-        block_layer = layer;
-        operation();
+    auto record_local=[&](const char* name,auto operation) {
+        totals.at(name)+=measure(operation);
     };
-    auto split_layer = [&](auto& shares, const auto& indices, const auto&, const auto&,
-            auto&, auto*) {
-        vector<Ring> bits(indices.size());
-        Backend backend = Backend::AUTO;
-        const auto compare = measure([&] {
-            backend = KonaReducedDepthHybrid::compare_pairs<64>(
-                    shares, indices, bits, true, profile, policy, dcf, &player);
-        });
-        const auto swap = measure([&] {
-            KonaCongKonaAdapter::ss_vec_kona_l2<64>(shares, indices, bits, &player);
-        });
-        record(Block, block_layer, indices.size() / 2, backend, compare);
-        record(Swap, block_layer, indices.size() / 2, backend, swap);
-        return backend;
-    };
-
-    size_t terminal_width = 0, terminal_phase = Matrix;
-    auto terminal_observer = [&](const char* phase, size_t, size_t width, auto operation) {
-        terminal_phase = std::string_view(phase) == "rank_mask" ? Mask : Matrix;
-        terminal_width = width;
-        operation();
-    };
-    auto secure_compare = [&](auto operation) {
-        Backend backend = Backend::AUTO;
-        const auto metric = measure([&] { backend = operation(); });
-        record(terminal_phase, 0, terminal_width, backend, metric);
-        return backend;
+    Metric block,terminal;
+    auto record_parent=[&](const char* name,auto operation) {
+        (std::string_view(name)=="block_cong"?block:terminal)=measure(operation);
     };
 
     Output<64> output;
-    octetStream ready, peer;
+    octetStream ready,peer;
     Ring(0).pack(ready);
-    player.exchange_concurrent(ready, peer);
-    auto online = measure([&] {
-        execute_blocks<64>(work, plan.blocks, profile, policy, dcf, &player,
-                block_observer, split_layer);
-        auto candidates = collect_block_candidates<64>(
-                work, plan.blocks.plan, plan.blocks.block_offsets);
-        output = execute_terminal<64>(std::move(candidates), plan.terminal, k, profile,
-                policy, dcf, &player, terminal_observer, secure_compare);
+    player.exchange_concurrent(ready,peer);
+    auto online=measure([&] {
+        output=KonaCutV3::execute(work,plan,profile,policy,dcf,&player,
+                record_parent,record_batch,record_local);
     });
 
-    Metric protocol_sum;
-    bool accounting = true;
-    for (const auto& batch : batches)
-    {
-        const auto& metric = batch.metric;
-        const uint64_t width = batch.width;
-        const bool swap = batch.backend == "SCS", dcf_batch = batch.backend == "DCF";
-        const auto exchanges = swap ? KonaBenchConfig::chunks(2 * width, KonaBenchConfig::mul_chunk()) :
-                dcf_batch ? KonaBenchConfig::chunks(width, KonaBenchConfig::dcf_chunk()) : 8;
-        accounting &= metric.bytes == width * (swap ? 64 : dcf_batch ? 8 : 70)
-                && metric.actions == 2 * exchanges && metric.evaluations == (dcf_batch ? 2 * width : 0);
-        protocol_sum += metric;
+    bool accounting=true;
+    for(auto& batch:batches) {
+        auto& metric=batch.metric;
+        const auto backend=batch.backend=="SCS"?Backend::AUTO:
+                batch.backend=="DCF"?Backend::DCF:Backend::PCR;
+        const auto shape=batch_shape(batch.width,backend);
+        metric.rounds=shape.logical;
+        accounting &= metric.bytes==shape.bytes && metric.actions==2*shape.exchanges &&
+                metric.evaluations==shape.dcf_calls;
+        totals.at(batch.phase)+=metric;
     }
-    totals[Local].ms = online.ms - protocol_sum.ms;
-    online.rounds = protocol_sum.rounds;
-    online.items = n;
-    accounting &= totals[Local].ms >= 0 && online.bytes == protocol_sum.bytes &&
-            online.actions == protocol_sum.actions && online.evaluations == protocol_sum.evaluations &&
-            totals[Block].items == plan.blocks.plan.block_comparators &&
-            totals[Swap].items == totals[Block].items &&
-            totals[Matrix].items == plan.terminal.matrix_comparators &&
-            totals[Mask].items == plan.terminal.mask_comparators;
+    auto close=[&](Metric& parent,const vector<string>& steps) {
+        Metric children;
+        for(const auto& step:steps)children+=totals.at(step);
+        accounting &= parent.bytes==children.bytes && parent.actions==children.actions &&
+                parent.evaluations==children.evaluations && parent.ms>=children.ms;
+        parent.rounds=children.rounds;
+        parent.items=children.items;
+        Metric other;
+        other.ms=parent.ms-children.ms;
+        return other;
+    };
+    totals["block_cong_other"]=close(block,block_steps);
+    totals["terminal_other"]=close(terminal,terminal_steps);
+    totals["block_cong"]=block;
+    totals["terminal"]=terminal;
+    totals["topk_other"]=close(online,{"block_cong","terminal"});
+    online.items=n;
+    accounting &= totals.at("block_compare").items==plan.blocks.plan.block_comparators &&
+            totals.at("scs").items==totals.at("block_compare").items &&
+            totals.at("matrix_compare").items==plan.terminal.matrix_comparators &&
+            totals.at("rank_mask").items==plan.terminal.mask_comparators;
 
     // Reveal synthetic outputs only after timing. Also check ordered block survivors.
     octetStream check_out, check_in;
@@ -260,7 +243,7 @@ int run(int argc, char** argv)
     player.exchange_concurrent(check_out, check_in);
     vector<Pair> selected;
     bool valid = true;
-    size_t block = 0, position = 0;
+    size_t block_index = 0, position = 0;
     uint64_t previous = 0;
     for (size_t i = 0; i < output.candidates.size(); ++i)
     {
@@ -274,9 +257,9 @@ int run(int argc, char** argv)
         valid &= bit.get_limb(0) <= 1;
         valid &= !position || previous < distance.get_limb(0);
         previous = distance.get_limb(0);
-        if (++position == size_t(keeps[block]))
+        if (++position == size_t(keeps[block_index]))
         {
-            ++block;
+            ++block_index;
             position = 0;
         }
         if (bit.get_limb(0) == 1)
@@ -294,14 +277,18 @@ int run(int argc, char** argv)
         print_metric(batch.metric);
         std::cout << '\n';
     }
-    for (size_t i = 0; i < totals.size(); ++i)
+    for (const auto& [name,metric]:totals)
     {
-        std::cout << "CUT_PHASE phase=" << phases[i];
-        print_metric(totals[i]);
+        const bool executed=(name!="matrix_compare"||metric.items) &&
+                (name!="block_compare"||metric.items) && (name!="scs"||metric.items) &&
+                ((name!="rank_local"&&name!="rank_mask"&&name!="rank_mask_prepare")||!plan.terminal.direct);
+        std::cout << "CUT_PHASE phase=" << name << " executed=" << executed;
+        print_metric(metric);
         std::cout << '\n';
     }
-    std::cout << "CUT_PHASE phase=online";
+    std::cout << "CUT_PHASE phase=topk executed=1";
     print_metric(online);
+    std::cout << "\ntopk_online_ms=" << online.ms;
     std::cout << "\naccounting_check=" << (accounting ? "PASS" : "FAIL")
               << "\ncorrectness=" << (valid ? "PASS" : "FAIL") << std::endl;
     return accounting && valid ? 0 : 1;
